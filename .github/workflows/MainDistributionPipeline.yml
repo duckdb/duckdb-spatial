@@ -24,22 +24,22 @@ concurrency:
 jobs:
   duckdb-latest-build:
     name: Build extension binaries
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@main
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v1.2.0
     with:
-      duckdb_version: main
+      duckdb_version: v1.2.0
       extension_name: spatial
-      ci_tools_version: main
+      ci_tools_version: v1.2.0
       vcpkg_commit: 5e5d0e1cd7785623065e77eff011afdeec1a3574
       exclude_archs: linux_amd64_musl
 
   duckdb-latest-deploy:
     name: Deploy extension binaries
     needs: duckdb-latest-build
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_deploy.yml@main
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_deploy.yml@v1.2.0
     secrets: inherit
     with:
-      duckdb_version: main
-      ci_tools_version: main
+      duckdb_version: v1.2.0
+      ci_tools_version: v1.2.0
       extension_name: spatial
       deploy_latest: ${{ startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main' }}
       exclude_archs: linux_amd64_musl
