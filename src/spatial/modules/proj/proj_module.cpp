@@ -55,8 +55,8 @@ PJ_CONTEXT *ProjModule::GetThreadProjContext() {
 	// We set the default context proj.db path to the one in the binary here
 	// Otherwise GDAL will try to load the proj.db from the system
 	// Any PJ_CONTEXT we create after this will inherit these settings
-	auto path = StringUtil::Format("file:/proj.db?immutable=1&ptr=%llu&sz=%lu&max=%lu",
-		static_cast<void *>(proj_db), proj_db_len, proj_db_len);
+	auto path = StringUtil::Format("file:/proj.db?immutable=1&ptr=%llu&sz=%lu&max=%lu", static_cast<void *>(proj_db),
+	                               proj_db_len, proj_db_len);
 
 	proj_context_set_sqlite3_vfs_name(ctx, "memvfs");
 	const auto ok = proj_context_set_database_path(ctx, path.c_str(), nullptr, nullptr);
@@ -97,13 +97,13 @@ void ProjModule::RegisterVFS(DatabaseInstance &db) {
 	// We set the default context proj.db path to the one in the binary here
 	// Otherwise GDAL will try to load the proj.db from the system
 	// Any PJ_CONTEXT we create after this will inherit these settings (on this thread?)
-	auto path = StringUtil::Format("file:/proj.db?immutable=1&ptr=%llu&sz=%lu&max=%lu",
-		static_cast<void *>(proj_db), proj_db_len, proj_db_len);
+	auto path = StringUtil::Format("file:/proj.db?immutable=1&ptr=%llu&sz=%lu&max=%lu", static_cast<void *>(proj_db),
+	                               proj_db_len, proj_db_len);
 
 	proj_context_set_sqlite3_vfs_name(nullptr, "memvfs");
 
 	// Try to open the database
-	sqlite3* sdb = nullptr;
+	sqlite3 *sdb = nullptr;
 	const auto sok = sqlite3_open_v2(path.c_str(), &sdb, SQLITE_OPEN_READONLY, "memvfs");
 	if (sok != SQLITE_OK) {
 		throw InternalException("Could not open sqlite3 memvfs database");

@@ -6,7 +6,9 @@
 
 #include "duckdb/common/vector_operations/senary_executor.hpp"
 #include "duckdb/common/vector_operations/generic_executor.hpp"
+#include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
 
 namespace duckdb {
 
@@ -191,6 +193,149 @@ public:
 //------------------------------------------------------------------------------
 
 namespace {
+
+struct ST_AsMVTGeom {
+
+	struct BindData final : FunctionData {
+		int32_t extent = 4096;
+		int32_t buffer = 256;
+		bool clip = true;
+
+		unique_ptr<FunctionData> Copy() const override {
+			auto copy = make_uniq<BindData>();
+			copy->extent = extent;
+			copy->buffer = buffer;
+			copy->clip = clip;
+			return std::move(copy);
+		}
+
+		bool Equals(const FunctionData &other) const override {
+			auto &other_data = other.Cast<BindData>();
+			return (extent == other_data.extent) && (buffer == other_data.buffer) && (clip == other_data.clip);
+		}
+	};
+
+	static unique_ptr<FunctionData> Bind(ClientContext &context, ScalarFunction &bound_function,
+	                                     vector<unique_ptr<Expression>> &arguments) {
+		auto result = make_uniq<BindData>();
+
+		if (arguments.size() > 2) {
+			auto &extent_expr = arguments[2];
+			if (extent_expr->return_type.id() != LogicalTypeId::INTEGER) {
+				throw InvalidInputException("ST_AsMVTGeom: extent must be an integer");
+			}
+			auto value = ExpressionExecutor::EvaluateScalar(context, *extent_expr);
+			if (value.IsNull()) {
+				throw InvalidInputException("ST_AsMVTGeom: extent cannot be NULL");
+			}
+			result->extent = value.GetValue<int32_t>();
+		}
+
+		if (arguments.size() > 3) {
+			auto &buffer_expr = arguments[3];
+			if (buffer_expr->return_type.id() != LogicalTypeId::INTEGER) {
+				throw InvalidInputException("ST_AsMVTGeom: buffer must be an integer");
+			}
+			auto value = ExpressionExecutor::EvaluateScalar(context, *buffer_expr);
+			if (value.IsNull()) {
+				throw InvalidInputException("ST_AsMVTGeom: buffer cannot be NULL");
+			}
+			result->buffer = value.GetValue<int32_t>();
+		}
+
+		if (arguments.size() > 4) {
+			auto &clip_expr = arguments[4];
+			if (clip_expr->return_type.id() != LogicalTypeId::BOOLEAN) {
+				throw InvalidInputException("ST_AsMVTGeom: clip must be a boolean");
+			}
+			auto value = ExpressionExecutor::EvaluateScalar(context, *clip_expr);
+			if (value.IsNull()) {
+				throw InvalidInputException("ST_AsMVTGeom: clip cannot be NULL");
+			}
+			result->clip = value.GetValue<bool>();
+		}
+
+		return std::move(result);
+	}
+
+	static void Execute(DataChunk &args, ExpressionState &state, Vector &result) {
+		using BOX_TYPE = StructTypeQuaternary<double, double, double, double>;
+		using GEOM_TYPE = PrimitiveType<string_t>;
+
+		auto &lstate = LocalState::ResetAndGet(state);
+
+		auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
+		const auto &bdata = func_expr.bind_info->Cast<BindData>();
+
+		GenericExecutor::ExecuteBinary<GEOM_TYPE, BOX_TYPE, GEOM_TYPE>(
+		    args.data[0], args.data[1], result, args.size(), [&](const GEOM_TYPE &geom_val, const BOX_TYPE &box_val) {
+			    auto &blob = geom_val.val;
+
+			    auto geom = lstate.Deserialize(blob);
+
+			    // Make sure polygons are oriented correctly
+			    geom.orient_polygons(true);
+
+			    const auto xmin = box_val.a_val;
+			    const auto ymin = box_val.b_val;
+			    const auto xmax = box_val.c_val;
+			    const auto ymax = box_val.d_val;
+
+			    const auto tile_w = xmax - xmin;
+			    const auto tile_h = ymax - ymin;
+
+			    // Clip geometry, if requested
+			    if (bdata.clip) {
+
+				    const auto ext = bdata.extent;
+				    const auto buf = bdata.buffer;
+
+				    const auto buf_w = buf * tile_w / ext;
+				    const auto buf_h = buf * tile_h / ext;
+
+				    const auto buf_xmin = xmin - buf_w;
+				    const auto buf_ymin = ymin - buf_h;
+				    const auto buf_xmax = xmax + buf_w;
+				    const auto buf_ymax = ymax + buf_h;
+
+				    auto clipped = geom.get_clipped(buf_xmin, buf_ymin, buf_xmax, buf_ymax);
+
+				    geom = std::move(clipped);
+			    }
+
+			    // TODO: Make valid/check vertices
+
+			    // Scale to fit the tile
+			    const auto xs = tile_w / (xmax - xmin);
+			    const auto ys = tile_h / (ymax - ymin);
+			    const auto scaled = geom.get_transformed(xmin, ymin, xs, ys);
+
+			    // Serialize
+			    return lstate.Serialize(result, scaled);
+		    });
+	}
+
+	static void Register(DatabaseInstance &db) {
+		FunctionBuilder::RegisterScalar(db, "ST_AsMVTGeom", [](ScalarFunctionBuilder &func) {
+			func.AddVariant([](ScalarFunctionVariantBuilder &variant) {
+				variant.AddParameter("geom", GeoTypes::GEOMETRY());
+				variant.AddParameter("box", GeoTypes::BOX_2D());
+				variant.SetReturnType(GeoTypes::GEOMETRY());
+
+				variant.SetInit(LocalState::Init);
+				variant.SetBind(Bind);
+				variant.SetFunction(Execute);
+			});
+
+			func.SetDescription(R"(
+				Returns a geometry that is suitable for use in an MVT tile.
+				The geometry will be clipped to the bounding box and scaled to fit the tile.
+			)");
+			func.SetTag("ext", "spatial");
+			func.SetTag("category", "conversion");
+		});
+	}
+};
 
 struct ST_Boundary {
 	static void Execute(DataChunk &args, ExpressionState &state, Vector &result) {
@@ -2717,6 +2862,7 @@ struct ST_CoverageInvalidEdges_Agg : GEOSCoverageAggFunction {
 void RegisterGEOSModule(DatabaseInstance &db) {
 
 	// Scalar Functions
+	ST_AsMVTGeom::Register(db);
 	ST_Boundary::Register(db);
 	ST_Buffer::Register(db);
 	ST_BuildArea::Register(db);

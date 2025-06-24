@@ -51,6 +51,10 @@ public:
 	GeosGeometry get_voronoi_diagram() const;
 	GeosGeometry get_built_area() const;
 	GeosGeometry get_noded() const;
+	GeosGeometry get_clipped(double xmin, double ymin, double xmax, double ymax) const;
+	GeosGeometry get_transformed(double xt, double yt, double xs, double ys) const;
+
+	void orient_polygons(bool ext_cw);
 
 	bool contains(const GeosGeometry &other) const;
 	bool covers(const GeosGeometry &other) const;
@@ -330,6 +334,28 @@ inline GeosGeometry GeosGeometry::get_built_area() const {
 
 inline GeosGeometry GeosGeometry::get_noded() const {
 	return GeosGeometry(handle, GEOSNode_r(handle, geom));
+}
+
+inline GeosGeometry GeosGeometry::get_clipped(double xmin, double ymin, double xmax, double ymax) const {
+	return GeosGeometry(handle, GEOSClipByRect_r(handle, geom, xmin, ymin, xmax, ymax));
+}
+
+inline GeosGeometry GeosGeometry::get_transformed(double xt, double yt, double xs, double ys) const {
+	double matrix[4] = {xt, yt, xs, ys};
+
+	return GeosGeometry(handle, GEOSGeom_transformXY_r(
+	                                handle, geom,
+	                                [](double *x, double *y, void *data) {
+		                                const auto mat = static_cast<const double *>(data);
+		                                *x = (*x - mat[0]) * mat[2];
+		                                *y = (*y - mat[1]) * mat[3];
+		                                return 1;
+	                                },
+	                                matrix));
+}
+
+inline void GeosGeometry::orient_polygons(bool ext_cw) {
+	GEOSOrientPolygons_r(handle, geom, ext_cw ? 1 : 0);
 }
 
 inline GeosGeometry GeosGeometry::get_maximum_inscribed_circle() const {
