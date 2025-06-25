@@ -325,7 +325,7 @@ struct ST_AsMVT {
 	struct Feature {
 		vector<uint32_t> geometry;
 		vector<pair<uint32_t, uint32_t>> tags;
-		uint32_t type;
+		int32_t type = 0;
 	};
 
 	struct Layer {
@@ -735,7 +735,7 @@ struct ST_AsMVT {
 								feature.geometry.push_back((1 & 0x7) | (1 << 3)); // MoveTo, 1 part
 								feature.geometry.push_back(protozero::encode_zigzag32(x - cursor_x));
 								feature.geometry.push_back(protozero::encode_zigzag32(y - cursor_y));
-								feature.geometry.push_back((2 & 0x7) | ((vertex_count - 1) << 3));
+								feature.geometry.push_back((2 & 0x7) | ((vertex_count - 2) << 3));
 
 								cursor_x = x;
 								cursor_y = y;
@@ -756,7 +756,7 @@ struct ST_AsMVT {
 				}
 			} break;
 			default:
-				throw InvalidInputException("ST_AsMVT: unsupported geometry type");
+				throw InvalidInputException("ST_AsMVT: unsupported geometry type %d", static_cast<int>(type));
 			}
 
 			// Write out the properties
@@ -846,12 +846,13 @@ struct ST_AsMVT {
 			layer_writer.add_string(1, bdata.layer_name);
 
 			// Add features
+			uint64_t fid = 0;
 			for (auto &feature : state.layer.features) {
 
 				protozero::pbf_writer feature_writer(layer_writer, 2);
 
 				// Id = 1
-				feature_writer.add_uint64(1, 0);
+				feature_writer.add_uint64(1, fid++);
 
 				// Tags = 2
 				protozero::packed_field_uint32 tags_writer(feature_writer, 2);
@@ -886,6 +887,7 @@ struct ST_AsMVT {
 
 			// Commit the layer
 			layer_writer.commit();
+
 
 			// Now we have the layer buffer, we can write it to the result vector
 			const auto result_data = FlatVector::GetData<string_t>(result);
