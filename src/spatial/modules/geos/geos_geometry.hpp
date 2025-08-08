@@ -91,6 +91,7 @@ public:
 	GeosGeometry get_coverage_invalid_edges(double tolerance) const;
 	GeosGeometry get_coverage_simplified(double tolerance, bool preserve_boundary) const;
 	GeosGeometry get_coverage_union() const;
+	GeosGeometry clip_by_rect(double x_min, double y_min, double x_max, double y_max) const;
 
 	PreparedGeosGeometry get_prepared() const;
 
@@ -478,6 +479,10 @@ inline GeosGeometry GeosGeometry::get_coverage_union() const {
 
 inline PreparedGeosGeometry GeosGeometry::get_prepared() const {
 	return PreparedGeosGeometry(handle, *this);
+}
+
+inline GeosGeometry GeosGeometry::clip_by_rect(double x_min, double y_min, double x_max, double y_max) const {
+	return GeosGeometry(handle, GEOSClipByRect_r(handle, geom, x_min, y_min, x_max, y_max));
 }
 
 //-- PreparedGeosGeometry --//

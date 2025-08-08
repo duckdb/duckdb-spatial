@@ -22,6 +22,10 @@
 // Extra
 #include "yyjson.h"
 
+#if SPATIAL_USE_GEOS
+#include "spatial/modules/geos/geos_module.hpp"
+#endif
+
 namespace duckdb {
 
 namespace {
@@ -1637,6 +1641,84 @@ struct ST_Centroid {
 
 			func.SetTag("ext", "spatial");
 			func.SetTag("category", "property");
+		});
+	}
+};
+
+//======================================================================================================================
+// ST_ClipByBox2D
+//======================================================================================================================
+
+struct ST_ClipByBox2D {
+
+	//------------------------------------------------------------------------------------------------------------------
+	// GEOMETRY
+	//------------------------------------------------------------------------------------------------------------------
+	static void ExecuteGeometry(DataChunk &args, ExpressionState &state, Vector &result) {
+		auto &lstate = LocalState::ResetAndGet(state);
+		auto &alloc = lstate.GetAllocator();
+
+		BinaryExecutor::Execute<string_t, string_t, string_t>(
+		    args.data[0], args.data[1], result, args.size(),
+		    [&](const string_t &geom_blob, const string_t &bbox_blob) {
+			    sgl::geometry geom;
+				sgl::geometry bbox;
+			    lstate.Deserialize(geom_blob, geom);
+				lstate.Deserialize(bbox_blob, bbox);
+
+				if (geom.get_type() == sgl::geometry_type::POINT) {
+					sgl::geometry clipped;
+					sgl::ops::clip_point_to_box(geom, bbox, clipped);
+					return lstate.Serialize(result, clipped);
+				} else if (geom.get_type() == sgl::geometry_type::MULTI_POINT) {
+					sgl::geometry clipped;
+					sgl::ops::clip_multipoint_to_box(alloc, geom, bbox, clipped);
+					return lstate.Serialize(result, clipped);
+				} else {
+#if SPATIAL_USE_GEOS
+					auto rect = sgl::extent_xy::smallest();
+					if (sgl::ops::get_total_extent_xy(bbox, rect) == 0) {
+						sgl::geometry clipped;
+						clipped.set_vertex_array(nullptr, 0);
+						return lstate.Serialize(result, clipped);
+					}
+					return GeosOperations::clip_to_rect(result, geom_blob, rect.min.x, rect.min.y, rect.max.x, rect.max.y);
+#else
+				    throw InvalidInputException("ST_ClipByBox2D: input is not a POINT or MULTIPOINT, and GEOS fallback is not available");
+#endif
+			    }
+		    });
+	}
+
+	//------------------------------------------------------------------------------------------------------------------
+	// Documentation
+	//------------------------------------------------------------------------------------------------------------------
+	static constexpr auto DESCRIPTION = R"(
+		Clips a geometry by a rectangular bounding box (BBOX).
+
+		This may produce a different kind of geometry. For example, a linestring can be converted into a multilinestring.
+	)";
+	static constexpr auto EXAMPLE = "";
+
+	//------------------------------------------------------------------------------------------------------------------
+	// Register
+	//------------------------------------------------------------------------------------------------------------------
+	static void Register(ExtensionLoader &loader) {
+		FunctionBuilder::RegisterScalar(loader, "ST_ClipByBox2D", [](ScalarFunctionBuilder &func) {
+			func.AddVariant([](ScalarFunctionVariantBuilder &variant) {
+				variant.AddParameter("geom", GeoTypes::GEOMETRY());
+				variant.AddParameter("box", GeoTypes::GEOMETRY());
+				variant.SetReturnType(GeoTypes::GEOMETRY());
+
+				variant.SetFunction(ExecuteGeometry);
+				variant.SetInit(LocalState::Init);
+			});
+
+			func.SetDescription(DESCRIPTION);
+			func.SetExample(EXAMPLE);
+
+			func.SetTag("ext", "spatial");
+			func.SetTag("category", "construction");
 		});
 	}
 };
@@ -9271,6 +9353,7 @@ void RegisterSpatialScalarFunctions(ExtensionLoader &loader) {
 	ST_AsSVG::Register(loader);
 	ST_Azimuth::Register(loader);
 	ST_Centroid::Register(loader);
+	ST_ClipByBox2D::Register(loader);
 	ST_Collect::Register(loader);
 	ST_CollectionExtract::Register(loader);
 	ST_Contains::Register(loader);

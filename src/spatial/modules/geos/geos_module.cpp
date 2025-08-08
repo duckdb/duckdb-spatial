@@ -2773,4 +2773,26 @@ void RegisterGEOSModule(ExtensionLoader &loader) {
 	ST_CoverageSimplify_Agg::Register(loader);
 }
 
+string_t GeosOperations::clip_to_rect(Vector &result, const string_t &blob, double x_min, double y_min, double x_max, double y_max) {
+	auto ctx = GEOS_init_r();
+
+	GEOSContext_setErrorMessageHandler_r(ctx, [](const char *message, void *) { throw InvalidInputException(message); }, nullptr);
+
+	const auto geom = GeosSerde::Deserialize(ctx, blob.GetData(), blob.GetSize());
+	if (geom == nullptr) {
+		GEOS_finish_r(ctx);
+		throw InvalidInputException("Could not deserialize geometry");
+	}
+	auto geos = GeosGeometry(ctx, geom);
+	auto clipped = geos.clip_by_rect(x_min, y_min, x_max, y_max);
+	const auto raw = clipped.get_raw();
+	const auto size = GeosSerde::GetRequiredSize(ctx, raw);
+	string_t serialized = StringVector::EmptyString(result, size);
+	const auto ptr = serialized.GetDataWriteable();
+	GeosSerde::Serialize(ctx, raw, ptr, size);
+	serialized.Finalize();
+	GEOS_finish_r(ctx);
+	return serialized;
+}
+
 } // namespace duckdb

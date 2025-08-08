@@ -1,12 +1,15 @@
 #include "sgl.hpp"
 
 #include <algorithm>
+#include <cassert>
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
+#include <iostream>
 #include <new>
 #include <queue>
 #include <string> // TODO: Remove this, it is only used for error messages in WKT reader
+#include <vector>
 
 //======================================================================================================================
 // Helpers
@@ -744,6 +747,105 @@ void ops::visit_polygon_geometries(const geometry &geom, void *state,
 		callback(state, part);
 	});
 }
+
+void ops::clip_point_to_box(const geometry &geom, const geometry &bbox, geometry &out_geom) {
+	SGL_ASSERT(geom.get_type() == geometry_type::POINT);
+	SGL_ASSERT(bbox.get_type() == geometry_type::POLYGON);
+	SGL_ASSERT(!geom.is_empty());
+
+	out_geom.set_type(geometry_type::POINT);
+	// TODO: determine if we want to keep Z.
+	out_geom.set_z(false);
+	out_geom.set_m(false);
+
+	auto rect = sgl::extent_xy::smallest();
+	if (sgl::ops::get_total_extent_xy(bbox, rect) == 0) {
+		out_geom.set_vertex_array(nullptr, 0);
+		return;
+	}
+
+	const auto vertex = geom.get_vertex_xy(0);
+	if (rect.contains(vertex)) {
+		out_geom.set_vertex_array(geom.get_vertex_array(), 1);
+	} else {
+		out_geom.set_vertex_array(nullptr, 0);
+	}
+}
+
+void ops::clip_multipoint_to_box(allocator &alloc, const geometry &geom, const geometry &bbox, geometry &out_geom) {
+	SGL_ASSERT(geom.get_type() == geometry_type::MULTI_POINT);
+	SGL_ASSERT(bbox.get_type() == geometry_type::POLYGON);
+	SGL_ASSERT(!geom.is_empty());
+
+	auto rect = sgl::extent_xy::smallest();
+	if (sgl::ops::get_total_extent_xy(bbox, rect) == 0) {
+		out_geom.set_vertex_array(nullptr, 0);
+		return;
+	}
+
+	// first pass
+	uint32_t num_points_to_return = 0;
+	visit_points(geom, [&rect, &num_points_to_return](const geometry &part) {
+		if (part.is_empty()) {
+			return;
+		}
+		const auto v_array = part.get_vertex_array();
+		const auto v_width = part.get_vertex_width();
+
+		vertex_xyzm vertex = {0, 0, 0, 0};
+		memcpy(&vertex, v_array, v_width);
+		if ((vertex.x < rect.min.x) || (vertex.x > rect.max.x) || (vertex.y < rect.min.y) || (vertex.y > rect.max.y)) {
+			return;
+		}
+		num_points_to_return += 1;
+	});
+
+	if (num_points_to_return == 0) {
+		out_geom.set_type(sgl::geometry_type::GEOMETRY_COLLECTION);
+	} else if (num_points_to_return == 1) {
+		out_geom.set_type(sgl::geometry_type::POINT);
+		// second pass
+		visit_points(geom, [&rect, &out_geom, &alloc](const geometry &part) {
+			if (part.is_empty()) {
+				return;
+			}
+			const auto v_array = part.get_vertex_array();
+			const auto v_width = part.get_vertex_width();
+
+			vertex_xyzm vertex = {0, 0, 0, 0};
+			memcpy(&vertex, v_array, v_width);
+			if ((vertex.x < rect.min.x) || (vertex.x > rect.max.x) || (vertex.y < rect.min.y) || (vertex.y > rect.max.y)) {
+				return;
+			}
+			const auto data_mem = static_cast<char *>(alloc.alloc(v_width));
+			memcpy(data_mem, &vertex, v_width);
+			out_geom.set_vertex_array(data_mem, 1);
+		});
+	} else {
+		out_geom.set_type(sgl::geometry_type::MULTI_POINT);
+		// second pass
+		visit_points(geom, [&rect, &out_geom, &alloc](const geometry &part) {
+			if (part.is_empty()) {
+				return;
+			}
+			const auto v_array = part.get_vertex_array();
+			const auto v_width = part.get_vertex_width();
+
+			vertex_xyzm vertex = {0, 0, 0, 0};
+			memcpy(&vertex, v_array, v_width);
+			if ((vertex.x < rect.min.x) || (vertex.x > rect.max.x) || (vertex.y < rect.min.y) || (vertex.y > rect.max.y)) {
+				return;
+			}
+			const auto data_mem = static_cast<char *>(alloc.alloc(v_width));
+			memcpy(data_mem, &vertex, v_width);
+			auto point_mem = static_cast<char *>(alloc.alloc(sizeof(sgl::geometry)));
+			auto point_ptr = new (point_mem) sgl::geometry(geometry_type::POINT, part.has_z(), part.has_m());
+			point_ptr->set_vertex_array(data_mem, 1);
+			out_geom.append_part(point_ptr);
+		});
+	}
+}
+
 
 } // namespace sgl
 

@@ -703,6 +703,9 @@ void locate_along(allocator &alloc, const geometry &linear_geom, double measure,
 void locate_between(allocator &alloc, const geometry &linear_geom, double measure_beg, double measure_end,
                     double offset, geometry &out_geom);
 
+void clip_point_to_box(const geometry &geom, const geometry &bbox, geometry &out_geom);
+void clip_multipoint_to_box(allocator &alloc, const geometry &geom, const geometry &bbox, geometry &out_geom);
+
 } // namespace ops
 
 // TODO: Move these
