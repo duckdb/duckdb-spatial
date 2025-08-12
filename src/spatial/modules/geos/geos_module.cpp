@@ -362,7 +362,7 @@ struct ST_BuildArea {
 	}
 
 	static constexpr auto DESCRIPTION = R"(
-		Creates a polygonal geometry by attemtping to "fill in" the input geometry.
+		Creates a polygonal geometry by attempting to "fill in" the input geometry.
 
 		Unlike ST_Polygonize, this function does not fill in holes.)";
 
@@ -1028,7 +1028,7 @@ struct ST_DistanceWithin {
 			});
 
 			func.SetDescription(R"(
-				Returns if two geometries are within a target distance of each-other
+				Returns true if two geometries are within a target distance of each-other
 			)");
 
 			func.SetTag("ext", "spatial");
