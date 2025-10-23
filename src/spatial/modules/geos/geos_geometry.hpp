@@ -369,7 +369,7 @@ inline GeosGeometry GeosGeometry::get_transformed(const double matrix[6]) const 
 }
 
 inline GeosGeometry GeosGeometry::get_gridded(double grid_size) const {
-	return GeosGeometry(handle, GEOSGeom_setPrecision_r(handle, geom, grid_size, GEOS_PREC_NO_TOPO));
+	return GeosGeometry(handle, GEOSGeom_setPrecision_r(handle, geom, grid_size, GEOS_PREC_VALID_OUTPUT));
 }
 
 inline GeosGeometry GeosGeometry::get_maximum_inscribed_circle() const {
