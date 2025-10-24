@@ -41,10 +41,11 @@ class DuckDBFileHandle final : public VSIVirtualHandle {
 private:
 	unique_ptr<FileHandle> file_handle;
 	bool is_eof;
+	bool has_error;
 
 public:
 	explicit DuckDBFileHandle(unique_ptr<FileHandle> file_handle_p)
-	    : file_handle(std::move(file_handle_p)), is_eof(false) {
+	    : file_handle(std::move(file_handle_p)), is_eof(false), has_error(false) {
 	}
 
 	vsi_l_offset Tell() override {
@@ -88,16 +89,19 @@ public:
 				pBuffer = static_cast<uint8_t *>(pBuffer) + read_bytes;
 			}
 		} catch (...) {
+			has_error = true;
 		}
 
 		if (remaining_bytes != 0) {
 			if (file_handle->SeekPosition() == file_handle->GetFileSize()) {
 				// Is at EOF!
 				is_eof = true;
+			} else {
+				// else, error!
+				// unfortunately, this version of GDAL cant distinguish between errors and reading less bytes
+				// its avaiable in 3.9.2, but we're stuck on 3.8.5 for now.
+				has_error = true;
 			}
-			// else, error!
-			// unfortunately, this version of GDAL cant distinguish between errors and reading less bytes
-			// its avaiable in 3.9.2, but we're stuck on 3.8.5 for now.
 		}
 
 		return nCount - (remaining_bytes / nSize);
@@ -112,6 +116,7 @@ public:
 		try {
 			written_bytes = file_handle->Write(const_cast<void *>(pBuffer), nSize * nCount);
 		} catch (...) {
+			has_error = true;
 		}
 		// Return the number of items written
 		return static_cast<size_t>(written_bytes / nSize);
@@ -128,6 +133,15 @@ public:
 	int Close() override {
 		file_handle->Close();
 		return 0;
+	}
+
+	void ClearErr() override {
+		has_error = false;
+		is_eof = false;
+	}
+
+	int Error() override {
+		return has_error ? TRUE : FALSE;
 	}
 
 	// int ReadMultiRange(int nRanges, void **ppData, const vsi_l_offset *panOffsets, const size_t *panSizes) override;
@@ -2030,7 +2044,7 @@ void RegisterGDALModule(ExtensionLoader &loader) {
 	static std::once_flag loaded;
 	std::call_once(loaded, [&]() {
 		// Register all embedded drivers (dont go looking for plugins)
-		OGRRegisterAllInternal();
+		OGRRegisterAll();
 
 		// Set GDAL error handler
 		CPLSetErrorHandler([](CPLErr e, int code, const char *raw_msg) {
