@@ -1,0 +1,164 @@
+# name: test/sql/mvt/st_asmvt_linestring.test
+# group: [mvt]
+
+require spatial
+
+# Test LINESTRING encoding
+statement ok
+COPY (
+	SELECT st_asmvt(
+		{"geom": geom},
+		'lines'
+	) as mvt
+	FROM (
+		SELECT
+			st_geomfromtext('LINESTRING(0 0, 100 100, 200 0)') as geom
+	)
+) TO '__TEST_DIR__/test_linestring.mvt' (FORMAT BLOB);
+
+query I
+select count(*) from st_read('__TEST_DIR__/test_linestring.mvt');
+----
+1
+
+# Test MULTI_LINESTRING encoding
+statement ok
+COPY (
+	SELECT st_asmvt(
+		{"geom": geom},
+		'multilines'
+	) as mvt
+	FROM (
+		SELECT
+			st_geomfromtext('MULTILINESTRING((0 0, 100 100, 200 0), (300 0, 400 100, 500 0))') as geom
+	)
+) TO '__TEST_DIR__/test_multilinestring.mvt' (FORMAT BLOB);
+
+query I
+select count(*) from st_read('__TEST_DIR__/test_multilinestring.mvt');
+----
+1
+
+# Test LINESTRING with ST_AsMVTGeom (clipping can produce MULTI_LINESTRING)
+statement ok
+COPY (
+	SELECT st_asmvt(
+		{"geom": ST_AsMVTGeom(
+			geom,
+			ST_MakeEnvelope(0, 0, 1000, 1000),
+			4096,
+			256,
+			true
+		)},
+		'clipped_lines'
+	) as mvt
+	FROM (
+		SELECT
+			st_geomfromtext('LINESTRING(100 100, 500 500, 900 100)') as geom
+	)
+) TO '__TEST_DIR__/test_clipped_linestring.mvt' (FORMAT BLOB);
+
+query I
+select count(*) from st_read('__TEST_DIR__/test_clipped_linestring.mvt');
+----
+1
+
+# Test LINESTRING crossing tile boundary (produces MULTI_LINESTRING after clipping)
+statement ok
+COPY (
+	SELECT st_asmvt(
+		{"geom": ST_AsMVTGeom(
+			geom,
+			ST_MakeEnvelope(0, 0, 1000, 1000),
+			4096,
+			256,
+			true
+		)},
+		'crossing_lines'
+	) as mvt
+	FROM (
+		SELECT
+			st_geomfromtext('LINESTRING(-500 500, 500 500, 1500 500)') as geom
+	)
+) TO '__TEST_DIR__/test_crossing_linestring.mvt' (FORMAT BLOB);
+
+query I
+select count(*) from st_read('__TEST_DIR__/test_crossing_linestring.mvt');
+----
+1
+
+# Test multiple LINESTRINGs with various lengths
+statement ok
+COPY (
+	SELECT st_asmvt(
+		{"geom": geom, "id": id},
+		'various_lines',
+		4096,
+		'geom',
+		'id'
+	) as mvt
+	FROM (
+		SELECT
+			row_number() over () as id,
+			st_geomfromtext('LINESTRING(' || (x*100) || ' ' || (y*100) || ', ' || (x*100+50) || ' ' || (y*100+50) || ', ' || (x*100+100) || ' ' || (y*100) || ')') as geom
+		FROM range(0, 10) as r(x),
+			 range(0, 10) as rr(y)
+	)
+) TO '__TEST_DIR__/test_various_linestrings.mvt' (FORMAT BLOB);
+
+query I
+select count(*) from st_read('__TEST_DIR__/test_various_linestrings.mvt');
+----
+100
+
+# Test global scale dataset scenario (like Natural Earth roads)
+# This simulates the case where geometries at low zoom levels span large areas
+statement ok
+COPY (
+	SELECT st_asmvt(
+		{"geom": ST_AsMVTGeom(
+			geom,
+			ST_TileEnvelope(2, 1, 1),
+			4096,
+			256,
+			false
+		)},
+		'global_lines'
+	) as mvt
+	FROM (
+		SELECT
+			st_geomfromtext('LINESTRING(-10000000 5000000, 0 0, 10000000 -5000000)') as geom
+	)
+) TO '__TEST_DIR__/test_global_linestring.mvt' (FORMAT BLOB);
+
+query I
+select count(*) from st_read('__TEST_DIR__/test_global_linestring.mvt');
+----
+1
+
+# Test that clipped MULTI_LINESTRING can be read back
+statement ok
+COPY (
+	SELECT st_asmvt(
+		{"geom": ST_AsMVTGeom(
+			geom,
+			ST_TileEnvelope(5, 10, 12),
+			4096,
+			256,
+			true
+		), "name": name},
+		'roads'
+	) as mvt
+	FROM (
+		VALUES
+			(st_geomfromtext('MULTILINESTRING((100 100, 500 500), (600 600, 900 900))'), 'road1'),
+			(st_geomfromtext('LINESTRING(200 200, 800 800)'), 'road2')
+	) t(geom, name)
+	WHERE ST_Intersects(geom, ST_TileEnvelope(5, 10, 12))
+) TO '__TEST_DIR__/test_roads.mvt' (FORMAT BLOB);
+
+query II
+select count(*), count(name) from st_read('__TEST_DIR__/test_roads.mvt');
+----
+2	2
+
