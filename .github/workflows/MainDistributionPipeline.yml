@@ -42,3 +42,12 @@ jobs:
       ci_tools_version: v1.4-andium
       extension_name: spatial
       deploy_latest: ${{ startsWith(github.ref, 'refs/heads/v') || github.ref == 'refs/heads/main' }}
+
+  duckdb-relassert-build:
+    name: Build extension binaries - relassert
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v1.4-andium
+    with:
+      duckdb_version: v1.4.3
+      ci_tools_version: v1.4-andium
+      extension_name: spatial
+      build_type: relassert
