@@ -54,7 +54,7 @@ add_library(fsst-lib STATIC
     "${MLT_SOURCE_DIR}/vendor/fsst/libfsst.cpp"
     "${MLT_SOURCE_DIR}/vendor/fsst/fsst_avx512.cpp"
 )
-target_include_directories(fsst-lib PUBLIC "${MLT_SOURCE_DIR}/vendor/fsst")
+target_include_directories(fsst-lib BEFORE PUBLIC "${MLT_SOURCE_DIR}/vendor/fsst")
 set_target_properties(fsst-lib PROPERTIES CXX_STANDARD 17)
 if(MSVC)
     target_compile_options(fsst-lib PRIVATE /w)
@@ -62,7 +62,7 @@ else()
     target_compile_options(fsst-lib PRIVATE -w)
 endif()
 target_link_libraries(mlt-cpp-encoder fsst-lib)
-target_include_directories(mlt-cpp-encoder PRIVATE "${MLT_SOURCE_DIR}/vendor/fsst")
+target_include_directories(mlt-cpp-encoder BEFORE PRIVATE "${MLT_SOURCE_DIR}/vendor/fsst")
 
 # --- Earcut (encoder dependency) ---
 set(EARCUT_BUILD_TESTS OFF CACHE BOOL "" FORCE)
