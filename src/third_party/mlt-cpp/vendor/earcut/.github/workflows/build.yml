@@ -1,0 +1,287 @@
+name: Build and test project
+
+on:
+  push:
+
+jobs:
+  Linux:
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - "ubuntu:22.04" # gcc 12.3.0, clang 14.0.0, cmake 3.22.1
+          - "ubuntu:24.04" # gcc 13.2.0, clang 18.1.3, cmake 3.28.3
+        cpp_compiler:
+          - clang++
+          - g++
+
+    runs-on: ubuntu-latest
+
+    container:
+      image: ${{ matrix.os }}
+
+    env:
+      CXX: ${{ matrix.cpp_compiler }}
+      DEBIAN_FRONTEND: noninteractive
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Update Git
+        run: |
+          apt-get update
+          apt-get install -y git
+          git --version
+
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          submodules: true
+
+      - name: Install Compiler
+        run: |
+          apt-get install -y cmake ninja-build clang g++ xorg-dev
+          clang --version
+          g++ --version
+          cmake --version
+          ninja --version
+
+      - name: Create build directory
+        run: mkdir -p build
+        shell: bash
+
+      - name: Configure CMake
+        working-directory: build
+        run: cmake .. -GNinja
+
+      - name: Build all targets
+        working-directory: build
+        run: ninja
+
+      - name: Run tests
+        run: build/tests
+
+  Coverage:
+    runs-on: ubuntu-latest
+
+    container:
+      image: ubuntu:24.04
+
+    env:
+      CXX: g++
+      DEBIAN_FRONTEND: noninteractive
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Update Git
+        run: |
+          apt-get update
+          apt-get install -y git
+          git --version
+
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          submodules: true
+
+      - name: Install dependencies
+        run: |
+          apt-get install -y cmake ninja-build g++ xorg-dev lcov gnupg
+          g++ --version
+          cmake --version
+          ninja --version
+          lcov --version
+
+      - name: Create build directory
+        run: mkdir -p build
+        shell: bash
+
+      - name: Configure CMake for coverage
+        working-directory: build
+        run: cmake .. -GNinja -DCMAKE_CXX_FLAGS="--coverage" -DCMAKE_BUILD_TYPE=Debug
+
+      - name: Build all targets
+        working-directory: build
+        run: ninja
+
+      - name: Run tests
+        run: build/tests
+
+      - name: Generate coverage report
+        run: |
+          # Create coverage directory
+          mkdir -p coverage
+
+          # Capture coverage data with error suppression for template-heavy code
+          lcov --capture --directory build --output-file coverage/coverage_raw.info \
+            --ignore-errors gcov,source,mismatch --gcov-tool gcov
+
+          # Remove system headers, vendor files, and test files from coverage
+          lcov --remove coverage/coverage_raw.info '/usr/*' --output-file coverage/coverage.info \
+            --ignore-errors unused
+          lcov --remove coverage/coverage.info '*/vendor/*' --output-file coverage/coverage.info \
+            --ignore-errors unused
+          lcov --remove coverage/coverage.info '*/test/*' --output-file coverage/coverage.info \
+            --ignore-errors unused
+          lcov --remove coverage/coverage.info '*/build/*' --output-file coverage/coverage.info \
+            --ignore-errors unused
+          lcov --remove coverage/coverage.info '*/CMakeFiles/*' --output-file coverage/coverage.info \
+            --ignore-errors unused
+
+          # Only include our main header files
+          lcov --extract coverage/coverage.info '*/include/*' --output-file coverage/coverage.info \
+            --ignore-errors unused
+
+          # Generate HTML report
+          genhtml coverage/coverage.info --output-directory coverage/html \
+            --title "Earcut.hpp Coverage Report" --legend \
+            --ignore-errors source
+
+          # Show summary
+          lcov --summary coverage/coverage.info
+
+      - name: Upload coverage reports as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+
+  Sanitizers:
+    runs-on: ubuntu-latest
+
+    container:
+      image: ubuntu:24.04
+
+    env:
+      CXX: clang++
+      DEBIAN_FRONTEND: noninteractive
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Update Git
+        run: |
+          apt-get update
+          apt-get install -y git
+          git --version
+
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          submodules: true
+
+      - name: Install dependencies
+        run: |
+          apt-get install -y cmake ninja-build clang xorg-dev
+          clang++ --version
+          cmake --version
+          ninja --version
+
+      - name: Create build directory
+        run: mkdir -p build
+        shell: bash
+
+      - name: Configure CMake with sanitizers
+        working-directory: build
+        run: cmake .. -GNinja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g"
+
+      - name: Build all targets
+        working-directory: build
+        run: ninja
+
+      - name: Run tests with sanitizers
+        run: build/tests
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:abort_on_error=1
+
+  Format:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format
+          clang-format --version
+
+      - name: Check code formatting
+        run: |
+          # Find all C++ files and check formatting
+          find include test -name "*.hpp" -o -name "*.cpp" | xargs clang-format --dry-run --Werror
+
+      - name: Generate formatting patch
+        if: failure()
+        run: |
+          # Create patch with correct formatting
+          find include test -name "*.hpp" -o -name "*.cpp" | xargs clang-format -i
+          git diff > formatting.patch
+
+          # Show the patch content
+          echo "=== Formatting issues found ==="
+          cat formatting.patch
+
+          # Reset changes
+          git checkout .
+
+      - name: Upload formatting patch
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: formatting-patch
+          path: formatting.patch
+
+  MacOS:
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - "macos-13"
+          - "macos-14"
+
+    runs-on: ${{ matrix.os }}
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          submodules: true
+
+      - name: Install CMake & Ninja
+        run: |
+          brew install cmake ninja
+          cmake --version
+          ninja --version
+
+      - name: Create build directory
+        run: mkdir -p build
+        shell: bash
+
+      - name: Configure CMake
+        working-directory: build
+        run: cmake .. -GNinja
+
+      - name: Build all targets
+        working-directory: build
+        run: ninja
+
+      - name: Run tests
+        run: build/tests

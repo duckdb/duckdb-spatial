@@ -1,0 +1,38 @@
+[build]
+  publish = 'web'
+  command = '''
+    for header in simde/*/*.h; do
+      header="$(echo "$header" | cut -b7-)"
+      mkdir -p web/amalgamated/$(dirname "$header");
+      ./amalgamate.py "simde/$header" > web/amalgamated/"${header}";
+    done
+  '''
+
+[[headers]]
+  for = "/amalgamated/*/*.h"
+  [headers.values]
+    Access-Control-Allow-Origin = "*"
+
+[[redirects]]
+  from = "/godbolt/simple"
+  to = "https://godbolt.org/z/Y3XexA"
+  status = 302
+  force = true
+
+[[redirects]]
+  from = "/godbolt/demo"
+  to = "https://godbolt.org/z/keBtF9"
+  status = 302
+  force = true
+
+[[redirects]]
+  from = "/godbolt/arm/neon/simple"
+  to = "https://godbolt.org/z/6rdp4L"
+  status = 302
+  force = true
+
+[[redirects]]
+  from = "/godbolt/arm/neon/demo"
+  to = "https://godbolt.org/z/sHVz49"
+  status = 302
+  force = true

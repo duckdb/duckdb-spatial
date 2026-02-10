@@ -41,6 +41,9 @@ add_subdirectory(src/third_party/yyjson)
 
 include_directories(src/third_party/protozero/include)
 
+add_subdirectory(src/third_party/mlt-cpp)
+include_directories(src/third_party/mlt-cpp/include)
+
 include_directories(src/third_party/shapelib)
 add_subdirectory(src/third_party/shapelib)
 
@@ -94,14 +97,14 @@ if((NOT EMSCRIPTEN) AND (NOT IOS))
 endif()
 
 # Add dependencies to extension
-target_link_libraries(${EXTENSION_NAME} ${EXTENSION_DEPENDENCIES})
+target_link_libraries(${EXTENSION_NAME} ${EXTENSION_DEPENDENCIES} mlt-cpp mlt-cpp-encoder)
 
 # Build extensions
 set(PARAMETERS "-warnings")
 build_loadable_extension(${TARGET_NAME} ${PARAMETERS} ${EXTENSION_SOURCES})
 
 target_link_libraries(${TARGET_NAME}_loadable_extension
-                      ${EXTENSION_DEPENDENCIES})
+                      ${EXTENSION_DEPENDENCIES} mlt-cpp mlt-cpp-encoder)
 
 install(
   TARGETS ${EXTENSION_NAME}
