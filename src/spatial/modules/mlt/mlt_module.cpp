@@ -113,15 +113,15 @@ static mlt::Encoder::Geometry ConvertGeometry(const string_t &geom_blob) {
 			throw InvalidInputException("ST_AsMLT: POLYGON can't be empty");
 		}
 
+		// Encoder expects coordinates = all ring vertices concatenated,
+		// ringSizes = vertex count per ring.
 		auto ring_cursor = cursor;
 		cursor.Skip((ring_count * 4) + (ring_count % 2 == 1 ? 4 : 0));
 		for (uint32_t i = 0; i < ring_count; i++) {
 			auto vertex_count = ring_cursor.Read<uint32_t>();
-			result.parts.push_back(read_vertices(vertex_count));
-		}
-		result.partRingSizes.resize(1);
-		for (auto &ring : result.parts) {
-			result.partRingSizes[0].push_back(static_cast<uint32_t>(ring.size()));
+			auto ring_verts = read_vertices(vertex_count);
+			result.coordinates.insert(result.coordinates.end(), ring_verts.begin(), ring_verts.end());
+			result.ringSizes.push_back(vertex_count);
 		}
 	} break;
 
@@ -174,12 +174,17 @@ static mlt::Encoder::Geometry ConvertGeometry(const string_t &geom_blob) {
 			auto ring_cursor = cursor;
 			cursor.Skip((ring_count * 4) + (ring_count % 2 == 1 ? 4 : 0));
 
+			// Encoder expects parts[p] = all vertices for polygon p (rings concatenated),
+			// with partRingSizes[p] listing the vertex count of each ring.
+			std::vector<Vertex> poly_verts;
 			std::vector<uint32_t> ring_sizes;
 			for (uint32_t ring_idx = 0; ring_idx < ring_count; ring_idx++) {
 				auto vertex_count = ring_cursor.Read<uint32_t>();
-				result.parts.push_back(read_vertices(vertex_count));
+				auto ring_verts = read_vertices(vertex_count);
+				poly_verts.insert(poly_verts.end(), ring_verts.begin(), ring_verts.end());
 				ring_sizes.push_back(vertex_count);
 			}
+			result.parts.push_back(std::move(poly_verts));
 			result.partRingSizes.push_back(std::move(ring_sizes));
 		}
 	} break;
