@@ -1172,6 +1172,17 @@ struct ST_Read_Meta {
 		// TODO: Add metadata, domains, relationships
 
 		// Get the filename list
+		const auto file_name = input.inputs[0].GetValue<string>();
+
+		// If the path starts with /vsi (GDAL virtual filesystem), pass it directly to GDAL.
+		// MultiFileReader doesn't understand /vsizip/, /vsicurl/, etc. and silently returns
+		// an empty file list, causing st_read_meta to return 0 rows.
+		if (StringUtil::StartsWith(file_name, "/vsi")) {
+			vector<OpenFileInfo> files;
+			files.emplace_back(file_name);
+			return make_uniq_base<FunctionData, BindData>(std::move(files));
+		}
+
 		const auto mfreader = MultiFileReader::Create(input.table_function);
 		const auto mflist = mfreader->CreateFileList(context, input.inputs[0], FileGlobOptions::ALLOW_EMPTY);
 		return make_uniq_base<FunctionData, BindData>(mflist->GetAllFiles());
