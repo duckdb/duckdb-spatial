@@ -79,6 +79,40 @@ struct Box {
 		return (min + max) / 2;
 	}
 
+	// Minimum squared distance from a point to the nearest edge of this box.
+	// Returns 0 if the point is inside the box.
+	VALUE_TYPE MinDistanceSquared(const V &point) const {
+		VALUE_TYPE dx = 0, dy = 0;
+		if (point.x < min.x) {
+			dx = min.x - point.x;
+		} else if (point.x > max.x) {
+			dx = point.x - max.x;
+		}
+		if (point.y < min.y) {
+			dy = min.y - point.y;
+		} else if (point.y > max.y) {
+			dy = point.y - max.y;
+		}
+		return dx * dx + dy * dy;
+	}
+
+	// Minimum squared distance between two boxes.
+	// Returns 0 if the boxes overlap.
+	VALUE_TYPE MinDistanceSquared(const Box &other) const {
+		VALUE_TYPE dx = 0, dy = 0;
+		if (other.max.x < min.x) {
+			dx = min.x - other.max.x;
+		} else if (other.min.x > max.x) {
+			dx = other.min.x - max.x;
+		}
+		if (other.max.y < min.y) {
+			dy = min.y - other.max.y;
+		} else if (other.min.y > max.y) {
+			dy = other.min.y - max.y;
+		}
+		return dx * dx + dy * dy;
+	}
+
 	bool operator==(const Box &other) const {
 		return min == other.min && max == other.max;
 	}
