@@ -1,6 +1,7 @@
 #include "spatial/operators/spatial_operator_extension.hpp"
 #include "spatial/index/rtree/rtree_index_create_logical.hpp"
 #include "spatial/operators/spatial_join_logical.hpp"
+#include "spatial/operators/spatial_knn_join_logical.hpp"
 
 #include "duckdb/main/database.hpp"
 #include "duckdb/planner/operator_extension.hpp"
@@ -34,8 +35,11 @@ public:
 		if (operator_type == LogicalSpatialJoin::OPERATOR_TYPE_NAME) {
 			return LogicalSpatialJoin::Deserialize(reader);
 		}
+		if (operator_type == LogicalSpatialKNNJoin::OPERATOR_TYPE_NAME) {
+			return LogicalSpatialKNNJoin::Deserialize(reader);
+		}
 
-		throw SerializationException("This version of the spatial extension does not support operator type '%s!",
+		throw SerializationException("This version of the spatial extension does not support operator type '%s'!",
 		                             operator_type);
 	}
 };

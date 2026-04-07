@@ -18,6 +18,7 @@
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 
 #include "spatial/util/distance_extract.hpp"
+#include "spatial/util/knn_extract.hpp"
 #include "spatial/spatial_settings.hpp"
 
 // Extra
@@ -9462,6 +9463,76 @@ constexpr const char *ST_X::NAME;
 constexpr const char *ST_Y::NAME;
 constexpr const char *ST_Z::NAME;
 
+//======================================================================================================================
+// ST_KNN
+//======================================================================================================================
+
+struct ST_KNN {
+
+	class BindData final : public FunctionData {
+	public:
+		int32_t k;
+		bool is_constant = false;
+
+		BindData(int32_t k_p) : k(k_p), is_constant(true) {
+		}
+
+		unique_ptr<FunctionData> Copy() const override {
+			return make_uniq<BindData>(k);
+		}
+
+		bool Equals(const FunctionData &other) const override {
+			auto &other_data = other.Cast<BindData>();
+			return is_constant == other_data.is_constant && k == other_data.k;
+		}
+	};
+
+	static unique_ptr<FunctionData> Bind3(ClientContext &context, ScalarFunction &bound_function,
+	                                      vector<unique_ptr<Expression>> &arguments) {
+		// ST_KNN(geom1, geom2, k)
+		if (arguments[2]->IsFoldable()) {
+			const auto k_expr = ExpressionExecutor::EvaluateScalar(context, *arguments[2]);
+			const auto k_value = k_expr.GetValue<int32_t>();
+			if (k_value < 1) {
+				throw InvalidInputException("ST_KNN: k must be >= 1, got %d", k_value);
+			}
+			Function::EraseArgument(bound_function, arguments, 2);
+			return make_uniq<BindData>(k_value);
+		}
+		throw InvalidInputException("ST_KNN: k must be a constant expression");
+	}
+
+	static void Execute(DataChunk &args, ExpressionState &state, Vector &result) {
+		throw InvalidInputException("ST_KNN cannot be used outside of a JOIN ON clause");
+	}
+
+	static void Register(ExtensionLoader &loader) {
+		FunctionBuilder::RegisterScalar(loader, "ST_KNN", [](ScalarFunctionBuilder &func) {
+			// ST_KNN(geom1, geom2, k)
+			func.AddVariant([](ScalarFunctionVariantBuilder &variant) {
+				variant.AddParameter("geom1", LogicalType::GEOMETRY());
+				variant.AddParameter("geom2", LogicalType::GEOMETRY());
+				variant.AddParameter("k", LogicalType::INTEGER);
+				variant.SetReturnType(LogicalType::BOOLEAN);
+				variant.SetBind(Bind3);
+				variant.SetFunction(Execute);
+			});
+			func.SetDescription(R"(
+				K-nearest neighbor spatial join predicate.
+				Finds the k nearest geometries from geom2 for each geom1.
+				Must be used in a JOIN ON clause.
+			)");
+			func.SetExample(R"(
+				SELECT a.id, b.id
+				FROM table_a a
+				JOIN table_b b ON ST_KNN(a.geom, b.geom, 5);
+			)");
+			func.SetTag("ext", "spatial");
+			func.SetTag("category", "relation");
+		});
+	}
+};
+
 } // namespace
 
 // Helper to access the constant distance from the bind data
@@ -9475,6 +9546,19 @@ bool ST_DWithinHelper::TryGetConstDistance(const unique_ptr<FunctionData> &bind_
 	}
 	return false;
 }
+
+// Helper to access the constant k from the bind data
+bool ST_KNNHelper::TryGetConstK(const unique_ptr<FunctionData> &bind_data, int32_t &result) {
+	if (bind_data) {
+		const auto &data = bind_data->Cast<ST_KNN::BindData>();
+		if (data.is_constant) {
+			result = data.k;
+			return true;
+		}
+	}
+	return false;
+}
+
 
 //######################################################################################################################
 // Register
@@ -9528,6 +9612,7 @@ void RegisterSpatialScalarFunctions(ExtensionLoader &loader) {
 	ST_InterpolatePoint::Register(loader);
 	ST_Intersects::Register(loader);
 	ST_Intersects_Extent::Register(loader);
+	ST_KNN::Register(loader);
 	ST_IsClosed::Register(loader);
 	ST_IsEmpty::Register(loader);
 	ST_Length::Register(loader);

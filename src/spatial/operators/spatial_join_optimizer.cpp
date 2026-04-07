@@ -1,6 +1,8 @@
 #include "spatial_join_optimizer.hpp"
 #include "spatial_join_logical.hpp"
+#include "spatial/operators/spatial_knn_join_logical.hpp"
 #include "spatial/util/distance_extract.hpp"
+#include "spatial/util/knn_extract.hpp"
 #include "spatial/spatial_types.hpp"
 
 #include "duckdb/main/database.hpp"
@@ -319,7 +321,168 @@ static void TrySwapAnyJoin(OptimizerExtensionInput &input, unique_ptr<LogicalOpe
 	plan = std::move(spatial_join);
 }
 
+//======================================================================================================================
+// KNN Join Detection
+//======================================================================================================================
+
+static bool IsKNNJoinPredicate(const unique_ptr<Expression> &expr, const unordered_set<idx_t> &left_bindings,
+                               const unordered_set<idx_t> &right_bindings, bool &needs_flipping, int32_t &k_value) {
+
+	const auto total_side = JoinSide::GetJoinSide(*expr, left_bindings, right_bindings);
+	if (total_side != JoinSide::BOTH) {
+		return false;
+	}
+
+	if (expr->type != ExpressionType::BOUND_FUNCTION) {
+		return false;
+	}
+
+	auto &func = expr->Cast<BoundFunctionExpression>();
+
+	if (!StringUtil::CIEquals(func.function.name, "ST_KNN")) {
+		return false;
+	}
+
+	// After bind, ST_KNN has 2 args (k was folded into bind_data)
+	if (func.children.size() != 2) {
+		return false;
+	}
+
+	if (func.return_type != LogicalType::BOOLEAN) {
+		return false;
+	}
+
+	const auto left_side = JoinSide::GetJoinSide(*func.children[0], left_bindings, right_bindings);
+	const auto right_side = JoinSide::GetJoinSide(*func.children[1], left_bindings, right_bindings);
+
+	if (left_side == JoinSide::BOTH || right_side == JoinSide::BOTH) {
+		return false;
+	}
+
+	needs_flipping = (left_side == JoinSide::RIGHT);
+
+	if (!ST_KNNHelper::TryGetConstK(func.bind_info, k_value)) {
+		return false;
+	}
+
+	return true;
+}
+
+static bool TrySwapKNNAnyJoin(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
+	auto &op = *plan;
+
+	if (op.type != LogicalOperatorType::LOGICAL_ANY_JOIN) {
+		return false;
+	}
+
+	auto &any_join = op.Cast<LogicalAnyJoin>();
+
+	// KNN supports INNER and LEFT joins.
+	// RIGHT may appear when JOO swaps a LEFT join — we convert it back to LEFT after child swap.
+	// Explicit RIGHT joins from the user are not supported (would need build-side outer emit).
+	if (any_join.join_type != JoinType::INNER && any_join.join_type != JoinType::LEFT &&
+	    any_join.join_type != JoinType::RIGHT) {
+		return false;
+	}
+
+	auto &left_child = any_join.children[0];
+	auto &right_child = any_join.children[1];
+	unordered_set<idx_t> left_bindings;
+	unordered_set<idx_t> right_bindings;
+	LogicalJoin::GetTableReferences(*left_child, left_bindings);
+	LogicalJoin::GetTableReferences(*right_child, right_bindings);
+
+	// Split the join condition by AND
+	vector<unique_ptr<Expression>> expressions;
+	expressions.push_back(any_join.condition->Copy());
+	LogicalFilter::SplitPredicates(expressions);
+
+	unique_ptr<Expression> knn_pred_expr = nullptr;
+	vector<unique_ptr<Expression>> extra_predicates;
+	int32_t k_value = 1;
+
+	for (auto &expr : expressions) {
+		bool unused_flip = false;
+		int32_t k_tmp = 0;
+		if (!knn_pred_expr && IsKNNJoinPredicate(expr, left_bindings, right_bindings, unused_flip, k_tmp)) {
+			knn_pred_expr = std::move(expr);
+			k_value = k_tmp;
+		} else if (expr) {
+			extra_predicates.push_back(std::move(expr));
+		}
+	}
+
+	if (!knn_pred_expr) {
+		return false;
+	}
+
+	// For non-INNER joins, extra predicates can't be pushed as filters safely
+	if (!extra_predicates.empty() && any_join.join_type != JoinType::INNER) {
+		return false;
+	}
+
+	// ST_KNN(probe_geom, build_geom, k): arg0 = probe side, arg1 = build side.
+	// DuckDB sinks children[1], so we need the build side at children[1].
+	// Determine which child the build key (second arg) currently references.
+	auto &knn_func = knn_pred_expr->Cast<BoundFunctionExpression>();
+	auto build_key_side = JoinSide::GetJoinSide(*knn_func.children[1], left_bindings, right_bindings);
+	bool needs_child_swap = (build_key_side == JoinSide::LEFT);
+
+
+	// When JOO swaps children, LEFT becomes RIGHT. Convert back to LEFT after our swap.
+	// If RIGHT wasn't produced by JOO swap, reject it — we don't support explicit RIGHT.
+	auto effective_join_type = any_join.join_type;
+	if (effective_join_type == JoinType::RIGHT) {
+		if (needs_child_swap) {
+			effective_join_type = JoinType::LEFT;
+		} else {
+			// Explicit RIGHT JOIN from user — not supported for KNN
+			return false;
+		}
+	}
+
+	auto knn_join = make_uniq<LogicalSpatialKNNJoin>(effective_join_type);
+	knn_join->spatial_predicate = std::move(knn_pred_expr);
+	knn_join->k = k_value;
+	knn_join->children = std::move(any_join.children);
+	knn_join->expressions = std::move(any_join.expressions);
+
+	if (needs_child_swap) {
+		std::swap(knn_join->children[0], knn_join->children[1]);
+		knn_join->left_projection_map = std::move(any_join.right_projection_map);
+		knn_join->right_projection_map = std::move(any_join.left_projection_map);
+	} else {
+		knn_join->left_projection_map = std::move(any_join.left_projection_map);
+		knn_join->right_projection_map = std::move(any_join.right_projection_map);
+	}
+
+	// build_child_idx is always 1 after potential swap
+	knn_join->build_child_idx = 1;
+
+	knn_join->join_stats = std::move(any_join.join_stats);
+	knn_join->has_estimated_cardinality = any_join.has_estimated_cardinality;
+	knn_join->estimated_cardinality = any_join.estimated_cardinality;
+
+	if (!extra_predicates.empty()) {
+		// Wrap KNN join in a filter for extra AND predicates (INNER only)
+		auto filter = make_uniq<LogicalFilter>();
+		filter->expressions = std::move(extra_predicates);
+		filter->children.push_back(std::move(knn_join));
+		plan = std::move(filter);
+	} else {
+		plan = std::move(knn_join);
+	}
+	return true;
+}
+
+//======================================================================================================================
+
 static void InsertSpatialJoin(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
+	// Try KNN first (more specific)
+	if (TrySwapKNNAnyJoin(input, plan)) {
+		return;
+	}
+
 	if (TrySwapComparisonJoin(input, plan)) {
 		return;
 	}
