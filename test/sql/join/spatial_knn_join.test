@@ -1,0 +1,264 @@
+# name: test/sql/join/spatial_knn_join.test
+# group: [join]
+
+require spatial
+
+# ===========================================================================
+# Setup: 10x10 grid of points
+# ===========================================================================
+
+statement ok
+CREATE TABLE probe AS
+SELECT ST_Point(x * 10, y * 10) as geom, (y * 10 + x) as id
+FROM generate_series(0, 9) r1(x), generate_series(0, 9) r2(y);
+
+statement ok
+CREATE TABLE build AS
+SELECT ST_Point(x * 10 + 5, y * 10 + 5) as geom, (y * 10 + x) as id
+FROM generate_series(0, 9) r1(x), generate_series(0, 9) r2(y);
+
+# ===========================================================================
+# EXPLAIN verification
+# ===========================================================================
+
+query II
+EXPLAIN SELECT * FROM probe JOIN build ON ST_KNN(probe.geom, build.geom, 3);
+----
+physical_plan	<REGEX>:.*SPATIAL_KNN_JOIN.*
+
+# ===========================================================================
+# Count correctness for various k
+# ===========================================================================
+
+query I
+SELECT count(*) FROM probe JOIN build ON ST_KNN(probe.geom, build.geom, 1);
+----
+100
+
+query I
+SELECT count(*) FROM probe JOIN build ON ST_KNN(probe.geom, build.geom, 3);
+----
+300
+
+query I
+SELECT count(*) FROM probe JOIN build ON ST_KNN(probe.geom, build.geom, 5);
+----
+500
+
+# Every probe row has exactly 1 distinct probe id per match set
+query I
+SELECT count(DISTINCT p.id) FROM probe p JOIN build b ON ST_KNN(p.geom, b.geom, 1);
+----
+100
+
+# ===========================================================================
+# Brute-force correctness: compare distances against window function
+# Tie-breaking order may differ, so compare (probe_id, distance) multisets
+# ===========================================================================
+
+query I
+SELECT count(*) FROM (
+    SELECT pid, dist FROM (
+        SELECT p.id as pid, ST_Distance(p.geom, b.geom) as dist
+        FROM probe p JOIN build b ON ST_KNN(p.geom, b.geom, 2)
+    ) knn
+    EXCEPT
+    SELECT pid, dist FROM (
+        SELECT p.id as pid, ST_Distance(p.geom, b.geom) as dist,
+               ROW_NUMBER() OVER (PARTITION BY p.id ORDER BY ST_Distance(p.geom, b.geom)) as rn
+        FROM probe p, build b
+    ) sub WHERE rn <= 2
+) diff;
+----
+0
+
+# ===========================================================================
+# Neighbor ordering: k=1 must return the actual closest point
+# ===========================================================================
+
+# For probe (0,0), nearest build point is (5,5) at distance sqrt(50) ~ 7.07
+query III
+SELECT p.id, b.id, round(ST_Distance(p.geom, b.geom), 2)
+FROM probe p JOIN build b ON ST_KNN(p.geom, b.geom, 1)
+WHERE p.id = 0;
+----
+0	0	7.07
+
+# For probe (90,90), nearest build point is at distance sqrt(50) ~ 7.07
+# (multiple equidistant candidates exist, so don't assert build ID)
+query II
+SELECT p.id, round(ST_Distance(p.geom, b.geom), 2)
+FROM probe p JOIN build b ON ST_KNN(p.geom, b.geom, 1)
+WHERE p.id = 99;
+----
+99	7.07
+
+# ===========================================================================
+# Asymmetric tables: JOO child swap
+# ===========================================================================
+
+statement ok
+CREATE TABLE tiny AS SELECT ST_Point(0, 0) as geom, 1 as id;
+
+query I
+SELECT count(*) FROM tiny t JOIN build b ON ST_KNN(t.geom, b.geom, 1);
+----
+1
+
+query I
+SELECT count(*) FROM tiny t JOIN build b ON ST_KNN(t.geom, b.geom, 5);
+----
+5
+
+query I
+SELECT round(ST_Distance(t.geom, b.geom), 2)
+FROM tiny t JOIN build b ON ST_KNN(t.geom, b.geom, 1);
+----
+7.07
+
+# Reverse asymmetry: large probe, small build
+query I
+SELECT count(*) FROM probe p JOIN tiny t ON ST_KNN(p.geom, t.geom, 1);
+----
+100
+
+# ===========================================================================
+# NULL geometries
+# ===========================================================================
+
+statement ok
+CREATE TABLE with_nulls AS
+SELECT CASE WHEN x % 10 = 0 THEN NULL ELSE ST_Point(x, x) END as geom, x as id
+FROM generate_series(1, 100) r(x);
+
+# Build side nulls: should still produce 100 results (one per probe row)
+query I
+SELECT count(*) FROM probe a JOIN with_nulls b ON ST_KNN(a.geom, b.geom, 1);
+----
+100
+
+# Probe side nulls: null probe rows should not produce matches
+statement ok
+CREATE TABLE probe_with_nulls AS
+SELECT CASE WHEN x % 5 = 0 THEN NULL ELSE ST_Point(x, 0) END as geom, x as id
+FROM generate_series(1, 10) r(x);
+
+query I
+SELECT count(*) FROM probe_with_nulls a JOIN build b ON ST_KNN(a.geom, b.geom, 1);
+----
+8
+
+# ===========================================================================
+# LEFT JOIN
+# ===========================================================================
+
+statement ok
+CREATE TABLE empty_tbl(geom GEOMETRY, id INTEGER);
+
+# LEFT JOIN with empty build: all probe rows with NULL build columns
+query I
+SELECT count(*) FROM probe p LEFT JOIN empty_tbl b ON ST_KNN(p.geom, b.geom, 1);
+----
+100
+
+query II
+SELECT p.id, b.id FROM tiny p LEFT JOIN empty_tbl b ON ST_KNN(p.geom, b.geom, 1);
+----
+1	NULL
+
+# LEFT JOIN with non-empty build: same as INNER for complete data
+query I
+SELECT count(*) FROM probe p LEFT JOIN build b ON ST_KNN(p.geom, b.geom, 1);
+----
+100
+
+# LEFT JOIN with asymmetric tables
+query I
+SELECT count(*) FROM tiny t LEFT JOIN build b ON ST_KNN(t.geom, b.geom, 3);
+----
+3
+
+# LEFT JOIN with NULL probe geoms: null rows get NULL build columns
+query I
+SELECT count(*) FROM probe_with_nulls a LEFT JOIN build b ON ST_KNN(a.geom, b.geom, 1);
+----
+10
+
+query I
+SELECT count(*) FROM probe_with_nulls a LEFT JOIN build b ON ST_KNN(a.geom, b.geom, 1)
+WHERE b.id IS NULL;
+----
+2
+
+# ===========================================================================
+# CTE support
+# ===========================================================================
+
+query I
+WITH nearby AS (
+    SELECT p.id as pid, b.id as bid, ST_Distance(p.geom, b.geom) as dist
+    FROM probe p JOIN build b ON ST_KNN(p.geom, b.geom, 2)
+)
+SELECT count(*) FROM nearby WHERE dist < 20;
+----
+200
+
+# ===========================================================================
+# ===========================================================================
+
+statement ok
+CREATE TABLE cities AS SELECT * FROM (VALUES
+    (ST_Point(-74.006, 40.7128), 'NYC'),
+    (ST_Point(-73.935, 40.730), 'Brooklyn'),
+    (ST_Point(-73.870, 40.774), 'Bronx')
+) t(geom, name);
+
+statement ok
+CREATE TABLE pois AS SELECT * FROM (VALUES
+    (ST_Point(-73.985, 40.748), 'EmpireState'),
+    (ST_Point(-73.968, 40.785), 'CentralPark'),
+    (ST_Point(-73.870, 40.773), 'YankeeStadium')
+) t(geom, name);
+
+query I
+SELECT count(*) FROM cities c JOIN pois p ON ST_KNN(c.geom, p.geom, 1);
+----
+3
+
+query II
+SELECT c.name, p.name FROM cities c JOIN pois p ON ST_KNN(c.geom, p.geom, 1)
+WHERE c.name = 'Bronx';
+----
+Bronx	YankeeStadium
+
+# Planar gives same nearest neighbor for this data
+query II
+SELECT c.name, p.name FROM cities c JOIN pois p ON ST_KNN(c.geom, p.geom, 1)
+WHERE c.name = 'Bronx';
+----
+Bronx	YankeeStadium
+
+# NYC to EmpireState is ~2.6km, not ~0.04 degrees
+query I
+SELECT CASE WHEN dist > 1000 AND dist < 5000 THEN 'OK' ELSE 'FAIL: ' || dist::varchar END
+FROM (
+    SELECT ST_Distance_Sphere(c.geom, p.geom) as dist
+    FROM cities c JOIN pois p ON ST_KNN(c.geom, p.geom, 1)
+    WHERE c.name = 'NYC'
+);
+----
+OK
+
+# ===========================================================================
+# Error handling
+# ===========================================================================
+
+statement error
+SELECT * FROM probe JOIN build ON ST_KNN(probe.geom, build.geom, 0);
+----
+ST_KNN: k must be >= 1
+
+statement error
+SELECT * FROM probe JOIN build ON ST_KNN(probe.geom, build.geom, -1);
+----
+ST_KNN: k must be >= 1

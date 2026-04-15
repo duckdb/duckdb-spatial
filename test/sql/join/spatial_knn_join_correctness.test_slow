@@ -1,0 +1,100 @@
+# name: test/sql/join/spatial_knn_join_correctness.test_slow
+# group: [join]
+#
+# Compares KNN join results against brute-force window function.
+# Uses distance multisets (not row IDs) since tie-breaking may differ.
+
+require spatial
+
+statement ok
+CREATE TABLE lhs AS
+SELECT ST_Point(x, y) as geom, (y * 50 + x) as id
+FROM generate_series(0, 200, 5) r1(x), generate_series(0, 200, 5) r2(y);
+
+statement ok
+CREATE TABLE rhs AS
+SELECT ST_Point(x + 2.5, y + 2.5) as geom, (y * 50 + x) as id
+FROM generate_series(0, 200, 5) r1(x), generate_series(0, 200, 5) r2(y);
+
+# ===========================================================================
+# Pass 1: brute-force (extension optimizer disabled)
+# ===========================================================================
+
+statement ok
+pragma disabled_optimizers='extension'
+
+# Brute-force KNN k=1 distances
+query II rowsort knn_k1_dists_bf
+SELECT pid, round(dist, 4) FROM (
+    SELECT l.id as pid, ST_Distance(l.geom, r.geom) as dist,
+           ROW_NUMBER() OVER (PARTITION BY l.id ORDER BY ST_Distance(l.geom, r.geom)) as rn
+    FROM lhs l, rhs r
+) sub WHERE rn <= 1;
+----
+
+# Brute-force KNN k=3 distances
+query II rowsort knn_k3_dists_bf
+SELECT pid, round(dist, 4) FROM (
+    SELECT l.id as pid, ST_Distance(l.geom, r.geom) as dist,
+           ROW_NUMBER() OVER (PARTITION BY l.id ORDER BY ST_Distance(l.geom, r.geom)) as rn
+    FROM lhs l, rhs r
+) sub WHERE rn <= 3;
+----
+
+# Brute-force count
+query I
+SELECT count(*) FROM (
+    SELECT l.id as pid, r.id as bid
+    FROM lhs l, rhs r
+    WHERE r.id IN (
+        SELECT r2.id FROM rhs r2 ORDER BY ST_Distance(l.geom, r2.geom) LIMIT 1
+    )
+);
+----
+1681
+
+# ===========================================================================
+# Pass 2: optimized KNN join
+# ===========================================================================
+
+statement ok
+pragma disabled_optimizers=''
+
+# Verify plan
+query II
+EXPLAIN SELECT * FROM lhs JOIN rhs ON ST_KNN(lhs.geom, rhs.geom, 1);
+----
+physical_plan	<REGEX>:.*SPATIAL_KNN_JOIN.*
+
+# Count
+query I
+SELECT count(*) FROM lhs l JOIN rhs r ON ST_KNN(l.geom, r.geom, 1);
+----
+1681
+
+# KNN k=1: distance multiset must match brute-force
+query II rowsort knn_k1_dists_bf
+SELECT l.id as pid, round(ST_Distance(l.geom, r.geom), 4)
+FROM lhs l JOIN rhs r ON ST_KNN(l.geom, r.geom, 1);
+----
+
+# KNN k=3: distance multiset must match brute-force
+query II rowsort knn_k3_dists_bf
+SELECT l.id as pid, round(ST_Distance(l.geom, r.geom), 4)
+FROM lhs l JOIN rhs r ON ST_KNN(l.geom, r.geom, 3);
+----
+
+# ===========================================================================
+# LEFT JOIN correctness: same count as INNER (all lhs rows have matches)
+# ===========================================================================
+
+query I
+SELECT count(*) FROM lhs l LEFT JOIN rhs r ON ST_KNN(l.geom, r.geom, 1);
+----
+1681
+
+# LEFT JOIN k=3 produces 3x rows
+query I
+SELECT count(*) FROM lhs l LEFT JOIN rhs r ON ST_KNN(l.geom, r.geom, 3);
+----
+5043

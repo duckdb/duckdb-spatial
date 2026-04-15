@@ -1,0 +1,57 @@
+# name: test/sql/join/spatial_knn_join_threads.test_slow
+# group: [join]
+#
+# Verifies KNN join produces correct results with multiple threads.
+# Compares single-threaded brute-force against multi-threaded KNN.
+
+require spatial
+
+statement ok
+CREATE TABLE mt_probe AS
+SELECT ST_Point(x * 7.3, y * 11.1) as geom, (y * 30 + x) as id
+FROM generate_series(0, 29) r1(x), generate_series(0, 29) r2(y);
+
+statement ok
+CREATE TABLE mt_build AS
+SELECT ST_Point(x * 7.3 + 3.5, y * 11.1 + 5.5) as geom, (y * 30 + x) as id
+FROM generate_series(0, 29) r1(x), generate_series(0, 29) r2(y);
+
+# ===========================================================================
+# Single-threaded brute-force baseline
+# ===========================================================================
+
+statement ok
+pragma disabled_optimizers='extension'
+
+statement ok
+PRAGMA threads = 1
+
+query II rowsort mt_k3_bf
+SELECT pid, round(dist, 4) FROM (
+    SELECT p.id as pid, ST_Distance(p.geom, b.geom) as dist,
+           ROW_NUMBER() OVER (PARTITION BY p.id ORDER BY ST_Distance(p.geom, b.geom)) as rn
+    FROM mt_probe p, mt_build b
+) sub WHERE rn <= 3;
+----
+
+# ===========================================================================
+# Multi-threaded KNN join
+# ===========================================================================
+
+statement ok
+pragma disabled_optimizers=''
+
+statement ok
+PRAGMA threads = 8
+
+# Must produce identical distance multiset
+query II rowsort mt_k3_bf
+SELECT p.id as pid, round(ST_Distance(p.geom, b.geom), 4)
+FROM mt_probe p JOIN mt_build b ON ST_KNN(p.geom, b.geom, 3);
+----
+
+# Count must match: 900 probe × 3 = 2700
+query I
+SELECT count(*) FROM mt_probe p JOIN mt_build b ON ST_KNN(p.geom, b.geom, 3);
+----
+2700

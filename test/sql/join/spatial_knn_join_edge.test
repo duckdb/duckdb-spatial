@@ -1,0 +1,259 @@
+# name: test/sql/join/spatial_knn_join_edge.test
+# group: [join]
+
+require spatial
+
+# ===========================================================================
+# k larger than build table count
+# ===========================================================================
+
+statement ok
+CREATE TABLE edge_probe AS
+SELECT ST_Point(x, 0) as geom, x as id FROM generate_series(1, 10) r(x);
+
+statement ok
+CREATE TABLE edge_build AS
+SELECT ST_Point(x, 0) as geom, x as id FROM generate_series(1, 10) r(x);
+
+# k=20 but only 10 build rows: returns all 10 per probe = 100 total
+query I
+SELECT count(*) FROM edge_probe JOIN edge_build ON ST_KNN(edge_probe.geom, edge_build.geom, 20);
+----
+100
+
+# ===========================================================================
+# Empty build side
+# ===========================================================================
+
+statement ok
+CREATE TABLE empty_build(geom GEOMETRY, id INTEGER);
+
+statement ok
+CREATE TABLE single_probe AS SELECT ST_Point(0, 0) as geom, 1 as id;
+
+# INNER with empty build: 0 results
+query I
+SELECT count(*) FROM single_probe JOIN empty_build ON ST_KNN(single_probe.geom, empty_build.geom, 5);
+----
+0
+
+# LEFT with empty build: probe rows with NULLs
+query II
+SELECT p.id, b.id FROM single_probe p LEFT JOIN empty_build b ON ST_KNN(p.geom, b.geom, 5);
+----
+1	NULL
+
+# ===========================================================================
+# Duplicate/equidistant geometries
+# ===========================================================================
+
+statement ok
+CREATE TABLE dupes_probe AS
+SELECT ST_Point(x, 0) as geom, x as id FROM generate_series(1, 10) r(x);
+
+statement ok
+CREATE TABLE dupes_build AS
+SELECT ST_Point(1, 1) as geom, x as id FROM generate_series(1, 10) r(x);
+
+# 10 probe rows, k=3, 10 build rows all at same point
+query I
+SELECT count(*) FROM dupes_probe JOIN dupes_build ON ST_KNN(dupes_probe.geom, dupes_build.geom, 3);
+----
+30
+
+# All distances from probe(1,0) to build(1,1) should be 1.0
+query I
+SELECT count(*) FROM (
+    SELECT round(ST_Distance(a.geom, b.geom), 2) as d
+    FROM dupes_probe a JOIN dupes_build b ON ST_KNN(a.geom, b.geom, 3)
+    WHERE a.id = 1
+) sub WHERE d = 1.0;
+----
+3
+
+# ===========================================================================
+# Multiple independent probe rows
+# ===========================================================================
+
+statement ok
+CREATE TABLE multi_probe AS
+SELECT ST_Point(x * 100, 0) as geom, x as id FROM generate_series(1, 10) r(x);
+
+statement ok
+CREATE TABLE multi_build AS
+SELECT ST_Point(x, 0) as geom, x as id FROM generate_series(1, 10) r(x);
+
+query I
+SELECT count(*) FROM multi_probe p JOIN multi_build b ON ST_KNN(p.geom, b.geom, 2);
+----
+20
+
+# ===========================================================================
+# Single row each side
+# ===========================================================================
+
+statement ok
+CREATE TABLE one_a AS SELECT ST_Point(0, 0) as geom, 1 as id;
+
+statement ok
+CREATE TABLE one_b AS SELECT ST_Point(3, 4) as geom, 2 as id;
+
+query III
+SELECT a.id, b.id, ST_Distance(a.geom, b.geom) FROM one_a a JOIN one_b b ON ST_KNN(a.geom, b.geom, 1);
+----
+1	2	5.0
+
+# LEFT JOIN single row
+query II
+SELECT a.id, b.id FROM one_a a LEFT JOIN one_b b ON ST_KNN(a.geom, b.geom, 1);
+----
+1	2
+
+# ===========================================================================
+# Asymmetric with LEFT JOIN — JOO stress test
+# ===========================================================================
+
+statement ok
+CREATE TABLE big_build AS
+SELECT ST_Point(x, y) as geom, (y * 100 + x) as id
+FROM generate_series(0, 99) r1(x), generate_series(0, 99) r2(y);
+
+query I
+SELECT count(*) FROM single_probe p LEFT JOIN big_build b ON ST_KNN(p.geom, b.geom, 3);
+----
+3
+
+# Verify nearest to (0,0) are (0,0), (1,0), (0,1)
+query I
+SELECT count(*) FROM (
+    SELECT round(ST_Distance(p.geom, b.geom), 2) as d
+    FROM single_probe p JOIN big_build b ON ST_KNN(p.geom, b.geom, 3)
+) sub WHERE d <= 1.42;
+----
+3
+
+# ===========================================================================
+# Polygon geometries (non-point KNN uses exact distance refinement)
+# ===========================================================================
+
+statement ok
+CREATE TABLE poly_probe AS SELECT * FROM (VALUES
+    (ST_GeomFromText('POLYGON ((0 0, 0 2, 2 2, 2 0, 0 0))'), 1),
+    (ST_GeomFromText('POLYGON ((10 10, 10 12, 12 12, 12 10, 10 10))'), 2)
+) t(geom, id);
+
+statement ok
+CREATE TABLE poly_build AS SELECT * FROM (VALUES
+    (ST_GeomFromText('POLYGON ((3 0, 3 2, 5 2, 5 0, 3 0))'), 10),
+    (ST_GeomFromText('POLYGON ((8 8, 8 10, 10 10, 10 8, 8 8))'), 20),
+    (ST_GeomFromText('POLYGON ((20 20, 20 22, 22 22, 22 20, 20 20))'), 30)
+) t(geom, id);
+
+# Polygon KNN k=1: each probe gets its nearest polygon
+query II rowsort
+SELECT p.id, b.id FROM poly_probe p JOIN poly_build b ON ST_KNN(p.geom, b.geom, 1);
+----
+1	10
+2	20
+
+# k=2
+query I
+SELECT count(*) FROM poly_probe p JOIN poly_build b ON ST_KNN(p.geom, b.geom, 2);
+----
+4
+
+# ===========================================================================
+# All-NULL build side (non-empty table, all geometries NULL)
+# ===========================================================================
+
+statement ok
+CREATE TABLE all_null_build AS
+SELECT NULL::GEOMETRY as geom, x as id FROM generate_series(1, 10) r(x);
+
+query I
+SELECT count(*) FROM single_probe p JOIN all_null_build b ON ST_KNN(p.geom, b.geom, 3);
+----
+0
+
+query II
+SELECT p.id, b.id FROM single_probe p LEFT JOIN all_null_build b ON ST_KNN(p.geom, b.geom, 3);
+----
+1	NULL
+
+# ===========================================================================
+# Compound KNN condition: ST_KNN AND extra predicate
+# ===========================================================================
+
+statement ok
+CREATE TABLE typed_probe AS
+SELECT ST_Point(x, 0) as geom, x as id, x % 2 as parity
+FROM generate_series(1, 10) r(x);
+
+statement ok
+CREATE TABLE typed_build AS
+SELECT ST_Point(x + 0.5, 0) as geom, x as id, x % 2 as parity
+FROM generate_series(1, 10) r(x);
+
+# KNN with extra equality predicate: when DuckDB splits the condition
+# into HASH_JOIN (equality) + FILTER (ST_KNN), ST_KNN is evaluated as
+# a scalar which throws. This is expected — use a subquery pattern instead.
+statement error
+SELECT count(*) FROM typed_probe p JOIN typed_build b
+ON ST_KNN(p.geom, b.geom, 2) AND p.parity = b.parity;
+----
+ST_KNN cannot be used outside of a JOIN ON clause
+
+# ===========================================================================
+# Collinear data (Hilbert div-by-zero guard)
+# ===========================================================================
+
+statement ok
+CREATE TABLE collinear_probe AS
+SELECT ST_Point(0, x) as geom, x as id FROM generate_series(1, 10) r(x);
+
+statement ok
+CREATE TABLE collinear_build AS
+SELECT ST_Point(0, x * 1.0 + 0.5) as geom, x as id FROM generate_series(1, 10) r(x);
+
+# All on x=0 line — zero x extent
+query I
+SELECT count(*) FROM collinear_probe p JOIN collinear_build b ON ST_KNN(p.geom, b.geom, 2);
+----
+20
+
+# All at same point — zero extent in both dimensions
+statement ok
+CREATE TABLE coincident_a AS
+SELECT ST_Point(5, 5) as geom, x as id FROM generate_series(1, 5) r(x);
+
+statement ok
+CREATE TABLE coincident_b AS
+SELECT ST_Point(5, 5) as geom, x as id FROM generate_series(1, 5) r(x);
+
+query I
+SELECT count(*) FROM coincident_a p JOIN coincident_b b ON ST_KNN(p.geom, b.geom, 3);
+----
+15
+
+# ===========================================================================
+# Large bounding box polygons (bbox distance != exact distance)
+# ===========================================================================
+
+statement ok
+CREATE TABLE thin_probe AS SELECT ST_GeomFromText('POLYGON ((0 0, 0 1, 1 1, 1 0, 0 0))') as geom, 1 as id;
+
+statement ok
+CREATE TABLE thin_build AS SELECT * FROM (VALUES
+    (ST_GeomFromText('POLYGON ((2 0, 2 1, 3 1, 3 0, 2 0))'), 1),
+    (ST_GeomFromText('POLYGON ((-100 -100, -100 100, 100 100, 100 -100, -100 -100))'), 2),
+    (ST_GeomFromText('POLYGON ((5 0, 5 1, 6 1, 6 0, 5 0))'), 3)
+) t(geom, id);
+
+# k=1: nearest by bbox would be the giant polygon (overlaps probe bbox), but by
+# exact distance the nearest is polygon 1 (gap of 1 unit) since the giant polygon
+# contains the probe. Actually ST_Distance to containing polygon is 0.
+# The giant polygon (id=2) contains the probe, so distance = 0.
+query II
+SELECT p.id, b.id FROM thin_probe p JOIN thin_build b ON ST_KNN(p.geom, b.geom, 1);
+----
+1	2
