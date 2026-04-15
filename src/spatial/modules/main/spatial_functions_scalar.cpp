@@ -5784,7 +5784,7 @@ struct ST_Distance_Sphere {
 		unique_ptr<FunctionData> Copy() const override {
 			auto copy = make_uniq<BindData>();
 			copy->always_xy = always_xy;
-			return copy;
+			return std::move(copy);
 		}
 		bool Equals(const FunctionData &other) const override {
 			auto &other_bind = other.Cast<BindData>();
