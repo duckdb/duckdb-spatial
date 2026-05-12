@@ -73,10 +73,14 @@ static bool bBigEndian = false;
 /************************************************************************/
 
 static SHPTreeNode *SHPTreeNodeCreate(const double *padfBoundsMin,
-                                      const double *padfBoundsMax)
+                                      const double *padfBoundsMax,
+                                      int nDimension)
 
 {
     SHPTreeNode *psTreeNode;
+
+    if (nDimension < 2 || nDimension > 4)
+        nDimension = 4;
 
     psTreeNode = STATIC_CAST(SHPTreeNode *, malloc(sizeof(SHPTreeNode)));
     if (SHPLIB_NULLPTR == psTreeNode)
@@ -89,10 +93,12 @@ static SHPTreeNode *SHPTreeNodeCreate(const double *padfBoundsMin,
     psTreeNode->nSubNodes = 0;
 
     if (padfBoundsMin != SHPLIB_NULLPTR)
-        memcpy(psTreeNode->adfBoundsMin, padfBoundsMin, sizeof(double) * 4);
+        memcpy(psTreeNode->adfBoundsMin, padfBoundsMin,
+               sizeof(double) * STATIC_CAST(size_t, nDimension));
 
     if (padfBoundsMax != SHPLIB_NULLPTR)
-        memcpy(psTreeNode->adfBoundsMax, padfBoundsMax, sizeof(double) * 4);
+        memcpy(psTreeNode->adfBoundsMax, padfBoundsMax,
+               sizeof(double) * STATIC_CAST(size_t, nDimension));
 
     return psTreeNode;
 }
@@ -167,7 +173,7 @@ SHPTree SHPAPI_CALL1(*)
     /* -------------------------------------------------------------------- */
     /*      Allocate the root node.                                         */
     /* -------------------------------------------------------------------- */
-    psTree->psRoot = SHPTreeNodeCreate(padfBoundsMin, padfBoundsMax);
+    psTree->psRoot = SHPTreeNodeCreate(padfBoundsMin, padfBoundsMax, nDimension);
     if (SHPLIB_NULLPTR == psTree->psRoot)
     {
         free(psTree);
