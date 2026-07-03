@@ -61,6 +61,8 @@ if(MSVC)
 else()
     target_compile_options(fsst-lib PRIVATE -w)
 endif()
+target_compile_definitions(fsst-lib PRIVATE libfsst=mlt_libfsst)
+target_compile_definitions(mlt-cpp-encoder PRIVATE libfsst=mlt_libfsst)
 target_link_libraries(mlt-cpp-encoder fsst-lib)
 target_include_directories(mlt-cpp-encoder BEFORE PRIVATE "${MLT_SOURCE_DIR}/vendor/fsst")
 
