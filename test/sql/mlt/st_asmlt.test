@@ -75,6 +75,20 @@ SELECT id, ST_AsText(geometry), name FROM ST_ReadMLT('__TEST_DIR__/no_ids.mlt') 
 NULL	POINT (1 2)	a
 NULL	POINT (3 4)	b
 
+# Invalid extents should fail during bind
+statement error
+SELECT ST_AsMLT({'geom': geom}, 'bad', -1)
+FROM (VALUES (ST_GeomFromText('POINT (0 0)'))) t(geom);
+----
+Invalid Input Error: ST_AsMLT: extent must be greater than zero
+
+# Negative feature IDs should fail during execution
+statement error
+SELECT ST_AsMLT({'geom': geom, 'id': id}, 'bad', 4096, 'geom', 'id')
+FROM (VALUES (-1, ST_GeomFromText('POINT (0 0)'))) t(id, geom);
+----
+Invalid Input Error: ST_AsMLT: feature id cannot be negative
+
 # Unsupported property types should fail during bind
 statement error
 SELECT ST_AsMLT({'geom': geom, 'bad': [1, 2]}, 'bad')

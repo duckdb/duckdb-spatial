@@ -250,7 +250,7 @@ struct ST_AsMLT {
 					throw InvalidInputException("ST_AsMLT: extent cannot be NULL");
 				}
 				result->extent = IntegerValue::Get(extent_val);
-				if (result->extent == 0) {
+				if (result->extent <= 0) {
 					throw InvalidInputException("ST_AsMLT: extent must be greater than zero");
 				}
 				folded_extent = true;
@@ -392,6 +392,16 @@ struct ST_AsMLT {
 		new (state_mem) State();
 	}
 
+	static void Destroy(Vector &state_vec, AggregateInputData &, idx_t count) {
+		UnifiedVectorFormat state_format;
+		state_vec.ToUnifiedFormat(count, state_format);
+		const auto state_ptr = UnifiedVectorFormat::GetData<State *>(state_format);
+
+		for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+			state_ptr[state_format.sel->get_index(row_idx)]->~State();
+		}
+	}
+
 	//------------------------------------------------------------------------------------------------------------------
 	// Update
 	//------------------------------------------------------------------------------------------------------------------
@@ -442,10 +452,16 @@ struct ST_AsMLT {
 					switch (fid_type.id()) {
 					case LogicalTypeId::INTEGER: {
 						auto val = UnifiedVectorFormat::GetData<int32_t>(fid_format)[fid_idx];
+						if (val < 0) {
+							throw InvalidInputException("ST_AsMLT: feature id cannot be negative");
+						}
 						feature.id = static_cast<uint64_t>(val);
 					} break;
 					case LogicalTypeId::BIGINT: {
 						auto val = UnifiedVectorFormat::GetData<int64_t>(fid_format)[fid_idx];
+						if (val < 0) {
+							throw InvalidInputException("ST_AsMLT: feature id cannot be negative");
+						}
 						feature.id = static_cast<uint64_t>(val);
 					} break;
 					default:
@@ -591,7 +607,7 @@ struct ST_AsMLT {
 			const auto optional_args = {LogicalType::VARCHAR, LogicalType::INTEGER, LogicalType::VARCHAR,
 			                            LogicalType::VARCHAR};
 			AggregateFunction agg({LogicalTypeId::ANY}, LogicalType::BLOB, StateSize, Initialize, Update, Combine,
-			                      Finalize, nullptr, Bind);
+			                      Finalize, nullptr, Bind, Destroy);
 
 			func.SetFunction(agg);
 			for (auto &arg_type : optional_args) {
