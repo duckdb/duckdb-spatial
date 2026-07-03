@@ -2,10 +2,7 @@
 
 #include "spatial/modules/mlt/mlt_module.hpp"
 
-#include "duckdb/common/types/hash.hpp"
-#include "duckdb/common/vector_operations/generic_executor.hpp"
 #include "duckdb/function/replacement_scan.hpp"
-#include "duckdb/main/database.hpp"
 #include "duckdb/parser/expression/constant_expression.hpp"
 #include "duckdb/parser/expression/function_expression.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
@@ -22,8 +19,6 @@
 #include <mlt/feature.hpp>
 #include <mlt/geometry.hpp>
 #include <mlt/properties.hpp>
-
-#include <optional>
 
 namespace duckdb {
 
@@ -587,7 +582,6 @@ struct ST_AsMLT {
 		The input struct must contain exactly one geometry column of type GEOMETRY. Property columns
 		may be of types VARCHAR, FLOAT, DOUBLE, INTEGER, BIGINT, or BOOLEAN.
 
-		MLT is a next-generation vector tile format with better compression and faster decoding than MVT.
 		Use ST_AsMVTGeom to transform geometries to tile coordinates before encoding.
 
 		```sql

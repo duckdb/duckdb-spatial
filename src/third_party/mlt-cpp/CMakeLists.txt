@@ -48,7 +48,7 @@ else()
 endif()
 
 # --- FSST (encoder dependency) ---
-# Reuse DuckDB's curated FSST copy instead of vendoring a second copy.
+# Use DuckDB's existing FSST target.
 target_link_libraries(mlt-cpp-encoder duckdb_fsst)
 target_include_directories(mlt-cpp-encoder BEFORE PRIVATE "${CMAKE_SOURCE_DIR}/third_party/fsst")
 target_compile_definitions(mlt-cpp-encoder PRIVATE
