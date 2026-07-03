@@ -48,36 +48,27 @@ static mlt::Encoder::Geometry ConvertGeometry(const string_t &geom_blob) {
 	mlt::Encoder::Geometry result;
 
 	BinaryReader cursor(geom_blob.GetData(), geom_blob.GetSize());
-	const auto type = static_cast<sgl::geometry_type>(cursor.Read<uint8_t>() + 1);
-	const auto flags = cursor.Read<uint8_t>();
-	cursor.Skip(sizeof(uint16_t));
-	cursor.Skip(sizeof(uint32_t)); // padding
-
-	const auto has_z = (flags & 0x01) != 0;
-	const auto has_m = (flags & 0x02) != 0;
-	const auto has_bbox = (flags & 0x04) != 0;
-
-	const auto format_v1 = (flags & 0x40) != 0;
-	const auto format_v0 = (flags & 0x80) != 0;
-	if (format_v1 || format_v0) {
-		throw NotImplementedException(
-		    "This geometry was written with an incompatible version of DuckDB spatial. Please upgrade.");
+	const auto le = cursor.Read<uint8_t>();
+	if (le != 1) {
+		throw InvalidInputException("ST_AsMLT: unsupported geometry endian-ness");
 	}
-
-	if (has_bbox) {
-		cursor.Skip(sizeof(float) * 2 * (2 + has_z + has_m));
-	}
-
-	cursor.Skip(sizeof(uint32_t)); // first type tag
+	const auto meta = cursor.Read<uint32_t>();
+	const auto type = static_cast<sgl::geometry_type>((meta & 0x0000FFFF) % 1000);
+	const auto flag = (meta & 0x0000FFFF) / 1000;
+	const auto has_z = (flag & 0x01) != 0;
+	const auto has_m = (flag & 0x02) != 0;
 
 	const auto vertex_width = (2 + (has_z ? 1 : 0) + (has_m ? 1 : 0)) * sizeof(double);
 	const auto vertex_space = vertex_width - (2 * sizeof(double));
 
 	auto read_vertex = [&]() -> Vertex {
-		auto x = CastDouble(cursor.Read<double>());
-		auto y = CastDouble(cursor.Read<double>());
+		auto x_double = cursor.Read<double>();
+		auto y_double = cursor.Read<double>();
 		cursor.Skip(vertex_space);
-		return {x, y};
+		if (std::isnan(x_double) && std::isnan(y_double)) {
+			throw InvalidInputException("ST_AsMLT: POINT geometry can't be empty");
+		}
+		return {CastDouble(x_double), CastDouble(y_double)};
 	};
 
 	auto read_vertices = [&](uint32_t count) -> std::vector<Vertex> {
@@ -92,10 +83,6 @@ static mlt::Encoder::Geometry ConvertGeometry(const string_t &geom_blob) {
 	switch (type) {
 	case sgl::geometry_type::POINT: {
 		result.type = GeometryType::POINT;
-		auto vertex_count = cursor.Read<uint32_t>();
-		if (vertex_count == 0) {
-			throw InvalidInputException("ST_AsMLT: POINT geometry can't be empty");
-		}
 		result.coordinates.push_back(read_vertex());
 	} break;
 
@@ -117,10 +104,8 @@ static mlt::Encoder::Geometry ConvertGeometry(const string_t &geom_blob) {
 
 		// Encoder expects coordinates = all ring vertices concatenated,
 		// ringSizes = vertex count per ring.
-		auto ring_cursor = cursor;
-		cursor.Skip((ring_count * 4) + (ring_count % 2 == 1 ? 4 : 0));
 		for (uint32_t i = 0; i < ring_count; i++) {
-			auto vertex_count = ring_cursor.Read<uint32_t>();
+			auto vertex_count = cursor.Read<uint32_t>();
 			auto ring_verts = read_vertices(vertex_count);
 			result.coordinates.insert(result.coordinates.end(), ring_verts.begin(), ring_verts.end());
 			result.ringSizes.push_back(vertex_count);
@@ -134,11 +119,7 @@ static mlt::Encoder::Geometry ConvertGeometry(const string_t &geom_blob) {
 			throw InvalidInputException("ST_AsMLT: MULTIPOINT can't be empty");
 		}
 		for (uint32_t i = 0; i < part_count; i++) {
-			cursor.Skip(sizeof(uint32_t)); // part type
-			auto vertex_count = cursor.Read<uint32_t>();
-			if (vertex_count == 0) {
-				throw InvalidInputException("ST_AsMLT: POINT in MULTIPOINT can't be empty");
-			}
+			cursor.Skip(sizeof(uint32_t) + sizeof(uint8_t)); // part size and type
 			result.coordinates.push_back(read_vertex());
 		}
 	} break;
@@ -150,7 +131,7 @@ static mlt::Encoder::Geometry ConvertGeometry(const string_t &geom_blob) {
 			throw InvalidInputException("ST_AsMLT: MULTILINESTRING can't be empty");
 		}
 		for (uint32_t i = 0; i < part_count; i++) {
-			cursor.Skip(sizeof(uint32_t)); // part type
+			cursor.Skip(sizeof(uint32_t) + sizeof(uint8_t)); // part size and type
 			auto vertex_count = cursor.Read<uint32_t>();
 			if (vertex_count < 2) {
 				throw InvalidInputException("ST_AsMLT: LINESTRING in MULTILINESTRING must have at least 2 vertices");
@@ -167,21 +148,18 @@ static mlt::Encoder::Geometry ConvertGeometry(const string_t &geom_blob) {
 		}
 
 		for (uint32_t poly_idx = 0; poly_idx < poly_count; poly_idx++) {
-			cursor.Skip(sizeof(uint32_t)); // part type
+			cursor.Skip(sizeof(uint32_t) + sizeof(uint8_t)); // part size and type
 			auto ring_count = cursor.Read<uint32_t>();
 			if (ring_count == 0) {
 				throw InvalidInputException("ST_AsMLT: POLYGON in MULTIPOLYGON can't be empty");
 			}
-
-			auto ring_cursor = cursor;
-			cursor.Skip((ring_count * 4) + (ring_count % 2 == 1 ? 4 : 0));
 
 			// Encoder expects parts[p] = all vertices for polygon p (rings concatenated),
 			// with partRingSizes[p] listing the vertex count of each ring.
 			std::vector<Vertex> poly_verts;
 			std::vector<uint32_t> ring_sizes;
 			for (uint32_t ring_idx = 0; ring_idx < ring_count; ring_idx++) {
-				auto vertex_count = ring_cursor.Read<uint32_t>();
+				auto vertex_count = cursor.Read<uint32_t>();
 				auto ring_verts = read_vertices(vertex_count);
 				poly_verts.insert(poly_verts.end(), ring_verts.begin(), ring_verts.end());
 				ring_sizes.push_back(vertex_count);
