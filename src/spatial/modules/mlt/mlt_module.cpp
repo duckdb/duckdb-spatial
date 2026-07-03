@@ -393,12 +393,9 @@ struct ST_AsMLT {
 	}
 
 	static void Destroy(Vector &state_vec, AggregateInputData &, idx_t count) {
-		UnifiedVectorFormat state_format;
-		state_vec.ToUnifiedFormat(count, state_format);
-		const auto state_ptr = UnifiedVectorFormat::GetData<State *>(state_format);
-
+		const auto state_ptr = FlatVector::GetData<State *>(state_vec);
 		for (idx_t row_idx = 0; row_idx < count; row_idx++) {
-			state_ptr[state_format.sel->get_index(row_idx)]->~State();
+			state_ptr[row_idx]->~State();
 		}
 	}
 
