@@ -19,6 +19,7 @@
 #include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <stdexcept>
 
@@ -77,14 +78,18 @@ std::uint32_t IntegerDecoder::decodeFastPfor([[maybe_unused]] BufferStream& buff
 #endif // _M_IX86 ...
 #endif // MLT_WITH_FASTPFOR_SIMD
 
-        const auto* inputValues = reinterpret_cast<const std::uint32_t*>(buffer.getReadPosition());
+        const auto* inputValues = buffer.getReadPosition();
 
         // TODO: change to little endian in the encoder?
         const auto intLength = (byteLength + sizeof(std::uint32_t) - 1) / sizeof(std::uint32_t);
         const auto leBuffer = getTempBuffer<std::uint32_t>(intLength);
-        std::transform(inputValues, inputValues + intLength, leBuffer.get(), [](std::uint32_t v) noexcept {
-            return std::byteswap(v);
-        });
+        for (std::size_t i = 0; i < intLength; ++i) {
+            std::uint32_t value = 0;
+            const auto offset = i * sizeof(std::uint32_t);
+            const auto bytesToCopy = std::min(sizeof(std::uint32_t), byteLength - offset);
+            std::memcpy(&value, inputValues + offset, bytesToCopy);
+            leBuffer[i] = std::byteswap(value);
+        }
 
         auto resultCount = numValues;
         impl->codec.decodeArray(leBuffer, intLength, result, resultCount);

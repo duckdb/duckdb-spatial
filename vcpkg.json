@@ -1,6 +1,7 @@
 {
   "dependencies": [
     "vcpkg-cmake",
+    "fastpfor",
     "openssl",
     "zlib",
     "geos",

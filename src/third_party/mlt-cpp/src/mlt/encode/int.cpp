@@ -17,6 +17,7 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -88,9 +89,9 @@ std::vector<std::uint8_t> encodeFastPforCore(std::span<const TInput> values, Tra
     }
 
     std::vector<std::uint8_t> result(compressedSize * sizeof(std::uint32_t));
-    auto* outWords = reinterpret_cast<std::uint32_t*>(result.data());
     for (std::size_t i = 0; i < compressedSize; ++i) {
-        outWords[i] = std::byteswap(compressed[i]);
+        const auto value = std::byteswap(compressed[i]);
+        std::memcpy(result.data() + (i * sizeof(std::uint32_t)), &value, sizeof(std::uint32_t));
     }
     return result;
 }

@@ -21,8 +21,6 @@ target_include_directories(mlt-cpp
     PUBLIC ${MLT_SOURCE_DIR}/include
     PRIVATE ${MLT_SOURCE_DIR}/src
 )
-target_include_directories(mlt-cpp PRIVATE "${MLT_SOURCE_DIR}/vendor/simde")
-
 if(MSVC)
     target_compile_options(mlt-cpp PRIVATE /w)
 else()
@@ -50,21 +48,18 @@ else()
 endif()
 
 # --- FSST (encoder dependency) ---
-add_library(fsst-lib STATIC
-    "${MLT_SOURCE_DIR}/vendor/fsst/libfsst.cpp"
-    "${MLT_SOURCE_DIR}/vendor/fsst/fsst_avx512.cpp"
+# Reuse DuckDB's curated FSST copy instead of vendoring a second copy.
+target_link_libraries(mlt-cpp-encoder duckdb_fsst)
+target_include_directories(mlt-cpp-encoder BEFORE PRIVATE "${CMAKE_SOURCE_DIR}/third_party/fsst")
+target_compile_definitions(mlt-cpp-encoder PRIVATE
+    fsst_encoder_t=duckdb_fsst_encoder_t
+    fsst_decoder_t=duckdb_fsst_decoder_t
+    fsst_create=duckdb_fsst_create
+    fsst_destroy=duckdb_fsst_destroy
+    fsst_compress=duckdb_fsst_compress
+    fsst_export=duckdb_fsst_export
+    fsst_decoder=duckdb_fsst_decoder
 )
-target_include_directories(fsst-lib BEFORE PUBLIC "${MLT_SOURCE_DIR}/vendor/fsst")
-set_target_properties(fsst-lib PROPERTIES CXX_STANDARD 17)
-if(MSVC)
-    target_compile_options(fsst-lib PRIVATE /w)
-else()
-    target_compile_options(fsst-lib PRIVATE -w)
-endif()
-target_compile_definitions(fsst-lib PRIVATE libfsst=mlt_libfsst)
-target_compile_definitions(mlt-cpp-encoder PRIVATE libfsst=mlt_libfsst)
-target_link_libraries(mlt-cpp-encoder fsst-lib)
-target_include_directories(mlt-cpp-encoder BEFORE PRIVATE "${MLT_SOURCE_DIR}/vendor/fsst")
 
 # --- Earcut (encoder dependency) ---
 add_library(earcut_hpp INTERFACE)
@@ -72,19 +67,11 @@ target_include_directories(earcut_hpp INTERFACE "${MLT_SOURCE_DIR}/vendor/earcut
 target_link_libraries(mlt-cpp-encoder earcut_hpp)
 
 # --- FastPFOR (decoder + encoder dependency) ---
-set(FASTPFOR_WITH_TEST OFF CACHE BOOL "Disable tests in FastPFor" FORCE)
-set(SUPPORT_NEON OFF CACHE BOOL "" FORCE)
-set(SUPPORT_SSE42 OFF CACHE BOOL "" FORCE)
-set(FASTPFOR_SIMD_MODE "portable" CACHE STRING "" FORCE)
-add_subdirectory("${MLT_SOURCE_DIR}/vendor/fastpfor" "${CMAKE_CURRENT_BINARY_DIR}/fastpfor" EXCLUDE_FROM_ALL)
-if(MSVC)
-    target_compile_options(FastPFOR PRIVATE /w)
-else()
-    target_compile_options(FastPFOR PRIVATE -w)
-endif()
-
+find_path(FASTPFOR_INCLUDE_DIR fastpfor.h REQUIRED)
+find_path(SIMDE_INCLUDE_DIR simde/x86/sse4.1.h REQUIRED)
+find_library(FASTPFOR_LIBRARY NAMES FastPFOR REQUIRED)
 foreach(_target mlt-cpp mlt-cpp-encoder)
-    target_link_libraries(${_target} FastPFOR)
-    target_include_directories(${_target} PRIVATE SYSTEM "${MLT_SOURCE_DIR}/vendor/fastpfor/headers")
-    target_compile_definitions(${_target} PUBLIC MLT_WITH_FASTPFOR=1 MLT_WITH_JSON=0)
+    target_link_libraries(${_target} ${FASTPFOR_LIBRARY})
+    target_include_directories(${_target} PRIVATE ${FASTPFOR_INCLUDE_DIR} ${SIMDE_INCLUDE_DIR})
+    target_compile_definitions(${_target} PUBLIC MLT_WITH_FASTPFOR=1 MLT_WITH_JSON=0 SIMDE_ENABLE_NATIVE_ALIASES)
 endforeach()

@@ -99,11 +99,11 @@ if((NOT EMSCRIPTEN) AND (NOT IOS))
 endif()
 
 # Collect mlt-cpp static archive paths for linking without polluting the export set
+find_library(FASTPFOR_LIBRARY NAMES FastPFOR REQUIRED)
 set(MLT_LIBS
   $<TARGET_FILE:mlt-cpp>
   $<TARGET_FILE:mlt-cpp-encoder>
-  $<TARGET_FILE:fsst-lib>
-  $<TARGET_FILE:FastPFOR>
+  ${FASTPFOR_LIBRARY}
 )
 
 # Add dependencies to extension

@@ -27,7 +27,7 @@ inline FsstResult encode(std::span<const std::uint8_t> data) {
         return {.symbols = {}, .symbolLengths = {}, .compressedData = {}, .decompressedLength = 0};
     }
 
-    const auto* strIn = data.data();
+    auto* strIn = const_cast<std::uint8_t*>(data.data());
     auto lenIn = data.size();
     const std::unique_ptr<fsst_encoder_t, EncoderDeleter> encoder(fsst_create(1, &lenIn, &strIn, 0));
     if (!encoder) {
