@@ -320,7 +320,7 @@ struct ST_AsMLT {
 		if (geom_name.empty()) {
 			for (idx_t i = 0; i < StructType::GetChildCount(row_type); i++) {
 				auto &child = StructType::GetChildType(row_type, i);
-				if (child == GeoTypes::GEOMETRY()) {
+				if (child == LogicalType::GEOMETRY()) {
 					if (geom_idx != optional_idx::Invalid()) {
 						throw InvalidInputException("ST_AsMLT: only one geometry column is allowed in the input row");
 					}
@@ -331,7 +331,7 @@ struct ST_AsMLT {
 			for (idx_t i = 0; i < StructType::GetChildCount(row_type); i++) {
 				auto &child = StructType::GetChildType(row_type, i);
 				auto &child_name = StructType::GetChildName(row_type, i);
-				if (child == GeoTypes::GEOMETRY() && child_name == geom_name) {
+				if (child == LogicalType::GEOMETRY() && child_name == geom_name) {
 					if (geom_idx != optional_idx::Invalid()) {
 						throw InvalidInputException("ST_AsMLT: only one geometry column is allowed in the input row");
 					}
@@ -825,7 +825,7 @@ struct ST_ReadMLT {
 		buffer.resize(file_size);
 		handle->Read(const_cast<char *>(buffer.data()), file_size, 0);
 
-		mlt::Decoder decoder;
+		mlt::Decoder decoder(true);
 		auto tile = decoder.decode(mlt::DataView(buffer.data(), buffer.size()));
 
 		auto result = make_uniq<ReadBindData>(file_name);
@@ -838,7 +838,7 @@ struct ST_ReadMLT {
 		return_types.push_back(LogicalType::UBIGINT);
 
 		names.push_back("geometry");
-		return_types.push_back(GeoTypes::GEOMETRY());
+		return_types.push_back(LogicalType::GEOMETRY());
 
 		// Collect property columns across all layers
 		unordered_map<string, LogicalType> seen_props;
@@ -871,7 +871,7 @@ struct ST_ReadMLT {
 		buffer.resize(file_size);
 		handle->Read(const_cast<char *>(buffer.data()), file_size, 0);
 
-		mlt::Decoder decoder;
+		mlt::Decoder decoder(true);
 		auto tile = decoder.decode(mlt::DataView(buffer.data(), buffer.size()));
 
 		return make_uniq<ReadGlobalState>(std::move(tile));
@@ -907,7 +907,12 @@ struct ST_ReadMLT {
 				output.data[0].SetValue(output_idx, Value(layer.getName()));
 
 				// id
-				output.data[1].SetValue(output_idx, Value::UBIGINT(feature.getID()));
+				auto feature_id = feature.getID();
+				if (feature_id.has_value()) {
+					output.data[1].SetValue(output_idx, Value::UBIGINT(feature_id.value()));
+				} else {
+					FlatVector::SetNull(output.data[1], output_idx, true);
+				}
 
 				// geometry
 				auto geom_blob = SerializeMLTGeometry(lstate.alloc, feature.getGeometry(), output.data[2]);
