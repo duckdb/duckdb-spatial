@@ -1,0 +1,84 @@
+# name: test/sql/mlt/st_asmlt.test
+# group: [mlt]
+
+require spatial
+
+# Basic encode/decode round-trip with feature IDs and properties
+statement ok
+COPY (
+	SELECT ST_AsMLT(
+		{'geom': geom, 'id': id, 'name': name, 'flag': flag},
+		'points',
+		4096,
+		'geom',
+		'id'
+	) AS mlt
+	FROM (VALUES
+		(1, 'a', true, ST_GeomFromText('POINT (1 2)')),
+		(2, 'b', false, ST_GeomFromText('POINT (3 4)'))
+	) t(id, name, flag, geom)
+) TO '__TEST_DIR__/points.mlt' (FORMAT BLOB);
+
+query ITTT
+SELECT id, ST_AsText(geometry), name, flag FROM ST_ReadMLT('__TEST_DIR__/points.mlt') ORDER BY id;
+----
+1	POINT (1 2)	a	true
+2	POINT (3 4)	b	false
+
+# Replacement scan for .mlt files
+query I
+SELECT count(*) FROM '__TEST_DIR__/points.mlt';
+----
+2
+
+# Geometry type round-trip coverage
+statement ok
+COPY (
+	SELECT ST_AsMLT(
+		{'geom': geom, 'id': id, 'kind': kind},
+		'geoms',
+		4096,
+		'geom',
+		'id'
+	) AS mlt
+	FROM (VALUES
+		(1, 'line', ST_GeomFromText('LINESTRING (0 0, 1 1, 2 1)')),
+		(2, 'poly', ST_GeomFromText('POLYGON ((0 0, 4 0, 4 4, 0 0))')),
+		(3, 'mpoint', ST_GeomFromText('MULTIPOINT (1 1, 2 2)')),
+		(4, 'mline', ST_GeomFromText('MULTILINESTRING ((0 0, 1 1), (2 2, 3 3))')),
+		(5, 'mpoly', ST_GeomFromText('MULTIPOLYGON (((0 0, 4 0, 4 4, 0 0)), ((10 10, 14 10, 14 14, 10 10)))'))
+	) t(id, kind, geom)
+) TO '__TEST_DIR__/geoms.mlt' (FORMAT BLOB);
+
+query ITT
+SELECT id, kind, ST_AsText(geometry) FROM ST_ReadMLT('__TEST_DIR__/geoms.mlt') ORDER BY id;
+----
+1	line	LINESTRING (0 0, 1 1, 2 1)
+2	poly	POLYGON ((0 0, 4 0, 4 4, 0 0))
+3	mpoint	MULTIPOINT (1 1, 2 2)
+4	mline	MULTILINESTRING ((0 0, 1 1), (2 2, 3 3))
+5	mpoly	MULTIPOLYGON (((0 0, 4 0, 4 4, 0 0)), ((10 10, 14 10, 14 14, 10 10)))
+
+# Feature IDs are optional
+statement ok
+COPY (
+	SELECT ST_AsMLT({'geom': geom, 'name': name}, 'no_ids') AS mlt
+	FROM (VALUES
+		('a', ST_GeomFromText('POINT (1 2)')),
+		('b', ST_GeomFromText('POINT (3 4)'))
+	) t(name, geom)
+) TO '__TEST_DIR__/no_ids.mlt' (FORMAT BLOB);
+
+query ITT
+SELECT id, ST_AsText(geometry), name FROM ST_ReadMLT('__TEST_DIR__/no_ids.mlt') ORDER BY name;
+----
+NULL	POINT (1 2)	a
+NULL	POINT (3 4)	b
+
+# Unsupported property types should fail during bind
+statement error
+SELECT ST_AsMLT({'geom': geom, 'bad': [1, 2]}, 'bad')
+FROM (VALUES (ST_GeomFromText('POINT (0 0)'))) t(geom);
+----
+Invalid Input Error: ST_AsMLT: property column "bad" has unsupported type "INTEGER[]"
+Only the following property types are supported: VARCHAR, FLOAT, DOUBLE, INTEGER, BIGINT, BOOLEAN
