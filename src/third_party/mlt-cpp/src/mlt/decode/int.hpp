@@ -18,13 +18,16 @@ public:
     using StreamMetadata = metadata::stream::StreamMetadata;
     using MortonEncodedStreamMetadata = metadata::stream::MortonEncodedStreamMetadata;
 
-    IntegerDecoder();
+    IntegerDecoder(bool enableFastPFOR);
     ~IntegerDecoder() noexcept;
 
     IntegerDecoder(IntegerDecoder&&) = delete;
     // FastPFOR classes have implicitly-deleted assignment operators.
     // We could create new ones, if really necessary.
     IntegerDecoder& operator=(IntegerDecoder&&) = delete;
+
+    /// Number of decoded values a stream yields (the buffer size for `decodeIntArray`).
+    static std::size_t getIntArrayBufferSize(std::size_t count, const StreamMetadata&);
 
     /// Decode a buffer of integers into another, according to the encoding scheme specified by the metadata
     /// @param values Input values
@@ -86,27 +89,61 @@ public:
 private:
     struct Impl;
     std::unique_ptr<Impl> impl;
-    std::vector<std::uint8_t> buffer;
+    std::vector<std::vector<std::uint8_t>> buffer;
+    std::size_t bufferIndex = 0;
+
+#if MLT_WITH_FASTPFOR
+    bool enableFastPFOR;
+#endif
+
+    // Very simple RAII wrapper for temporary buffers.
+    // Buffers must be used only within a current method invocation.
+    struct BufWrapperBase : util::noncopyable {
+        BufWrapperBase(IntegerDecoder& decoder_, std::uint8_t* ptr_) noexcept
+            : decoder(decoder_),
+              ptr(ptr_) {
+            if (ptr) {
+                decoder.bufferIndex++;
+            }
+        }
+        BufWrapperBase(BufWrapperBase&& other) noexcept
+            : decoder(other.decoder),
+              ptr(other.ptr) {
+            other.ptr = nullptr;
+        }
+        ~BufWrapperBase() noexcept {
+            if (ptr) {
+                decoder.bufferIndex--;
+            }
+        }
+        IntegerDecoder& decoder;
+        std::uint8_t* ptr;
+    };
+    template <typename T>
+    struct BufWrapper : BufWrapperBase {
+        BufWrapper(IntegerDecoder& decoder_, std::uint8_t* ptr_) noexcept // NOLINT(readability-non-const-parameter)
+            : BufWrapperBase(decoder_, ptr_) {}
+        T* get() const noexcept { return reinterpret_cast<T*>(ptr); }
+        operator T*() const noexcept { return get(); }
+    };
 
     /// Get a buffer for intermediate values, which must not be retained beyond the current method invocation
     template <typename T>
-    T* getTempBuffer(std::size_t minSize) {
-        buffer.resize(std::max(buffer.size(), minSize * sizeof(T)));
-        return reinterpret_cast<T*>(buffer.data());
+    BufWrapper<T> getTempBuffer(std::size_t minSize) {
+        buffer.resize(std::max(buffer.size(), bufferIndex + 1));
+        buffer[bufferIndex].resize(std::max(buffer[bufferIndex].size(), minSize * sizeof(T)));
+        return {*this, buffer[bufferIndex].data()};
     }
-
-    /// Get the size of the buffer necessary for `decodeIntArray`
-    std::size_t getIntArrayBufferSize(const std::size_t count, const StreamMetadata&);
 
     template <typename TDecode, typename TTarget = TDecode>
         requires(std::is_integral_v<TDecode> && (std::is_integral_v<TTarget> || std::is_enum_v<TTarget>))
     void decodeStream(BufferStream& tileData, TTarget* out, std::size_t outSize, const StreamMetadata&);
 
     template <typename T>
-    static void decodeRLE(const std::vector<T>& values, std::vector<T>& out, const std::uint32_t numRuns);
+    static void decodeRLE(const std::vector<T>& values, std::vector<T>& out, std::uint32_t numRuns);
 
     template <typename T>
-    static void decodeDeltaRLE(const std::vector<T>& values, std::vector<T>& out, const std::uint32_t numRuns);
+    static void decodeDeltaRLE(const std::vector<T>& values, std::vector<T>& out, std::uint32_t numRuns);
 
     /// Decode zigzag-delta values
     /// @param values Input values
@@ -117,10 +154,7 @@ private:
     template <typename T, typename TTarget>
         requires(std::is_integral_v<underlying_type_t<T>> && std::is_integral_v<underlying_type_t<TTarget>> &&
                  sizeof(T) <= sizeof(TTarget))
-    static void decodeZigZagDelta(const T* values,
-                                  const std::size_t count,
-                                  TTarget* const out,
-                                  const std::size_t outCount) noexcept;
+    static void decodeZigZagDelta(const T* values, std::size_t count, TTarget* out, std::size_t outCount) noexcept;
 
     /// Decode standard or delta Morton codes
     /// @param data Input data
@@ -129,16 +163,16 @@ private:
     /// @param outCount Number of available output values
     template <typename TDecode, typename TTarget, bool delta>
         requires(std::is_integral_v<TDecode> && (std::is_integral_v<TTarget> || std::is_enum_v<TTarget>))
-    static void decodeMortonCodes(const TDecode* const data,
-                                  const std::size_t count,
+    static void decodeMortonCodes(const TDecode* data,
+                                  std::size_t count,
                                   TTarget* out,
                                   std::size_t outCount,
                                   int numBits,
                                   int coordinateShift) noexcept;
 
     std::uint32_t decodeFastPfor(BufferStream& buffer,
-                                 std::uint32_t* const result,
-                                 const std::size_t numValues,
-                                 const std::size_t byteLength);
+                                 std::uint32_t* result,
+                                 std::size_t numValues,
+                                 std::size_t byteLength);
 };
 } // namespace mlt::decoder

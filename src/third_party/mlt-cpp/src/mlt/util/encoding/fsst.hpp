@@ -24,19 +24,19 @@ struct EncoderDeleter {
 
 inline FsstResult encode(std::span<const std::uint8_t> data) {
     if (data.empty()) {
-        return {{}, {}, {}, 0};
+        return {.symbols = {}, .symbolLengths = {}, .compressedData = {}, .decompressedLength = 0};
     }
 
     const auto* strIn = data.data();
     auto lenIn = data.size();
-    std::unique_ptr<fsst_encoder_t, EncoderDeleter> encoder(fsst_create(1, &lenIn, &strIn, 0));
+    const std::unique_ptr<fsst_encoder_t, EncoderDeleter> encoder(fsst_create(1, &lenIn, &strIn, 0));
     if (!encoder) {
         throw std::runtime_error("fsst_create failed");
     }
 
-    std::vector<std::uint8_t> outBuf(7 + 2 * lenIn);
+    std::vector<std::uint8_t> outBuf(7 + (2 * lenIn));
     std::size_t lenOut = 0;
-    unsigned char* strOut = nullptr;
+    unsigned char* strOut = nullptr; // NOLINT(misc-const-correctness)
     auto compressed = fsst_compress(encoder.get(), 1, &lenIn, &strIn, outBuf.size(), outBuf.data(), &lenOut, &strOut);
     if (compressed != 1) {
         throw std::runtime_error("fsst_compress failed");
@@ -68,10 +68,10 @@ inline FsstResult encode(std::span<const std::uint8_t> data) {
     }
 
     return FsstResult{
-        std::move(symbolBytes),
-        std::move(symbolLengths),
-        std::move(outBuf),
-        static_cast<std::uint32_t>(lenIn),
+        .symbols = std::move(symbolBytes),
+        .symbolLengths = std::move(symbolLengths),
+        .compressedData = std::move(outBuf),
+        .decompressedLength = static_cast<std::uint32_t>(lenIn),
     };
 }
 

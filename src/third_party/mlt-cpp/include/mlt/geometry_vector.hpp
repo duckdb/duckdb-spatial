@@ -5,15 +5,18 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstdint>
+#include <optional>
+#include <vector>
 
 namespace mlt::geometry {
 
 struct MortonSettings {
-    unsigned numBits;
-    unsigned coordinateShift;
+    std::uint32_t numBits;
+    std::int32_t coordinateShift;
 };
 
-enum class VertexBufferType : std::uint32_t {
+enum class VertexBufferType : std::uint8_t {
     MORTON,
     VEC_2,
     VEC_3
@@ -23,9 +26,9 @@ struct TopologyVector : public util::noncopyable {
     TopologyVector(std::vector<std::uint32_t>&& geometryOffsets_,
                    std::vector<std::uint32_t>&& partOffsets_,
                    std::vector<std::uint32_t>&& ringOffsets_) noexcept
-        : geometryOffsets(geometryOffsets_),
-          partOffsets(partOffsets_),
-          ringOffsets(ringOffsets_) {}
+        : geometryOffsets(std::move(geometryOffsets_)),
+          partOffsets(std::move(partOffsets_)),
+          ringOffsets(std::move(ringOffsets_)) {}
 
     const std::vector<std::uint32_t>& getGeometryOffsets() const noexcept { return geometryOffsets; }
 
@@ -54,7 +57,6 @@ struct GeometryVector : public util::noncopyable {
 protected:
     GeometryVector(std::uint32_t numGeometries_,
                    bool singleType_,
-
                    std::vector<std::uint32_t>&& indexBuffer_,
                    std::vector<std::int32_t>&& vertexBuffer_,
                    VertexBufferType vertexBufferType_,
@@ -63,7 +65,6 @@ protected:
                    std::optional<TopologyVector>&& topologyVector_,
                    std::optional<MortonSettings> mortonSettings_ = {}) noexcept
         : numGeometries(numGeometries_),
-          scale(1.0f),
           singleType(singleType_),
           indexBuffer(std::move(indexBuffer_)),
           vertexBuffer(std::move(vertexBuffer_)),
@@ -79,9 +80,8 @@ protected:
                         std::uint32_t totalVertices,
                         bool multiPolygon) const;
 
-protected:
     std::uint32_t numGeometries;
-    float scale;
+    float scale = 1.0f;
     bool singleType;
     std::vector<std::uint32_t> indexBuffer;
     std::vector<std::int32_t> vertexBuffer;
@@ -115,7 +115,6 @@ private:
 
 struct ConstGpuVector : public GpuVector {
     ConstGpuVector(std::uint32_t numGeometries_,
-
                    GeometryType geometryType_,
                    std::vector<std::uint32_t>&& triangleCounts_,
                    std::vector<std::uint32_t>&& indexBuffer_,
@@ -241,7 +240,7 @@ struct FlatGeometryVector : public CpuVector {
                        std::vector<std::uint32_t>&& vertexOffsets_,
                        std::vector<std::int32_t>&& vertexBuffer_,
                        VertexBufferType vertexBufferType_,
-                       std::optional<MortonSettings> mortonSettings_) noexcept
+                       std::optional<MortonSettings> mortonSettings_)
         : CpuVector(static_cast<std::uint32_t>(geometryTypes_.size()),
                     /*singleType=*/false,
                     std::move(topologyVector_),

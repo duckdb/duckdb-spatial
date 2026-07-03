@@ -15,7 +15,7 @@ public:
     using GeometryType = metadata::tileset::GeometryType;
 
 protected:
-    Geometry(GeometryType type_) noexcept
+    explicit Geometry(GeometryType type_) noexcept
         : type(type_) {}
 
 public:
@@ -32,7 +32,7 @@ private:
 
 class Point : public Geometry {
 public:
-    Point(const Coordinate& coord) noexcept
+    explicit Point(const Coordinate& coord) noexcept
         : Geometry(GeometryType::POINT),
           coordinate(coord) {}
 
@@ -44,7 +44,7 @@ private:
 
 class MultiPoint : public Geometry {
 public:
-    MultiPoint(CoordVec coords) noexcept
+    explicit MultiPoint(CoordVec coords) noexcept
         : Geometry(GeometryType::MULTIPOINT),
           coordinates(std::move(coords)) {}
 
@@ -61,7 +61,7 @@ private:
 
 class LineString : public MultiPoint {
 public:
-    LineString(CoordVec coords) noexcept
+    explicit LineString(CoordVec coords) noexcept
         : MultiPoint(std::move(coords), GeometryType::LINESTRING) {}
 
 private:
@@ -69,7 +69,7 @@ private:
 
 class LinearRing : public MultiPoint {
 public:
-    LinearRing(CoordVec coords) noexcept
+    explicit LinearRing(CoordVec coords) noexcept
         : MultiPoint(std::move(coords)) {}
 
 private:
@@ -77,7 +77,7 @@ private:
 
 class MultiLineString : public Geometry {
 public:
-    MultiLineString(std::vector<CoordVec> lineStrings_) noexcept
+    explicit MultiLineString(std::vector<CoordVec> lineStrings_) noexcept
         : Geometry(GeometryType::MULTILINESTRING),
           lineStrings(std::move(lineStrings_)) {}
 
@@ -92,7 +92,7 @@ public:
     using Ring = CoordVec;
     using RingVec = std::vector<Ring>;
 
-    Polygon(RingVec rings_) noexcept
+    explicit Polygon(RingVec rings_) noexcept
         : Geometry(GeometryType::POLYGON),
           rings(std::move(rings_)) {}
 
@@ -107,7 +107,7 @@ public:
     using Ring = CoordVec;
     using RingVec = std::vector<CoordVec>;
 
-    MultiPolygon(std::vector<RingVec> polygons_) noexcept
+    explicit MultiPolygon(std::vector<RingVec> polygons_) noexcept
         : Geometry(GeometryType::MULTIPOLYGON),
           polygons(std::move(polygons_)) {}
 

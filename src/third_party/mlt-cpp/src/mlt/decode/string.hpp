@@ -10,8 +10,8 @@
 #include <mlt/util/raw.hpp>
 #include <mlt/util/varint.hpp>
 
-#include <string>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 
 namespace mlt::decoder {
@@ -28,7 +28,7 @@ public:
      * -> fsst dictionary -> symbolTable, symbolLength, dictionary, length, present, data
      * */
 
-    StringDictViews decode(BufferStream& tileData, std::uint32_t numStreams, std::uint32_t numValues) {
+    StringDictViews decode(BufferStream& tileData, std::uint32_t numStreams) {
         using namespace metadata::stream;
         using namespace util::decoding;
 
@@ -37,11 +37,9 @@ public:
         std::vector<std::uint8_t> dictionaryStream;
         std::vector<std::uint8_t> symbolStream;
         std::vector<std::uint32_t> offsetStream;
-        std::vector<std::uint32_t> dictLengthStream;
-        std::vector<std::uint32_t> symbolLengthStream;
+        std::vector<std::uint32_t> dictLengthStream;   // NOLINT(misc-const-correctness)
+        std::vector<std::uint32_t> symbolLengthStream; // NOLINT(misc-const-correctness)
         std::vector<std::string_view> views;
-        std::optional<std::uint32_t> presentValueCount;
-        views.reserve(numValues);
         for (std::uint32_t i = 0; i < numStreams; ++i) {
             const auto streamMetadata = StreamMetadata::decode(tileData);
             switch (streamMetadata->getPhysicalStreamType()) {
@@ -73,23 +71,20 @@ public:
             }
         }
 
-        if (presentValueCount && *presentValueCount != numValues) {
-            throw std::runtime_error("Unexpected present value count for string column");
-        }
-
         if (!dictLengthStream.empty() && !symbolLengthStream.empty()) {
             auto data = decodeFSST(symbolStream, symbolLengthStream, dictionaryStream, 2 * dictionaryStream.size());
-            decodeDictionary(dictLengthStream, data, offsetStream, views, numValues);
+            decodeDictionary(dictLengthStream, data, offsetStream, views);
             return {std::move(data), std::move(views)};
-        } else if (!offsetStream.empty() && !dictLengthStream.empty()) {
-            decodeDictionary(dictLengthStream, dictionaryStream, offsetStream, views, numValues);
-            return {std::move(dictionaryStream), std::move(views)};
-        } else if (!symbolLengthStream.empty()) {
-            decodePlain(symbolLengthStream, symbolStream, views, numValues);
-            return {std::move(symbolStream), std::move(views)};
-        } else {
-            throw std::runtime_error("Expected streams missing in string decoding");
         }
+        if (!offsetStream.empty() && !dictLengthStream.empty()) {
+            decodeDictionary(dictLengthStream, dictionaryStream, offsetStream, views);
+            return {std::move(dictionaryStream), std::move(views)};
+        }
+        if (!symbolLengthStream.empty()) {
+            decodePlain(symbolLengthStream, symbolStream, views);
+            return {std::move(symbolStream), std::move(views)};
+        }
+        throw std::runtime_error("Expected streams missing in string decoding");
     }
 
     /// Multiple string columns sharing a dictionary
@@ -108,8 +103,6 @@ public:
         auto dictionaryStream = std::make_shared<std::vector<std::uint8_t>>();
         std::vector<std::uint32_t> symbolLengthStream;
         std::vector<std::uint8_t> symbolTableStream;
-        PackedBitset presentStream;
-        std::optional<std::uint32_t> presentValueCount;
         PropertyVecMap results;
 
         bool dictionaryStreamDecoded = false;
@@ -150,20 +143,26 @@ public:
         }
 
         for (const auto& child : column.getComplexType().children) {
-            const auto childStreams = decodeVarint<std::uint32_t>(tileData);
-            // TODO: We don't really need this stream count until the present stream is optional.
-            // We could infer it from the nullable bit in the column, but only if that applies to all children.
-            if (childStreams != 2 || !child.hasScalarType() ||
-                child.getScalarType().getPhysicalType() != ScalarType::STRING) {
-                throw std::runtime_error("Currently only optional string fields are implemented for a struct");
+            [[maybe_unused]] const auto childStreams = decodeVarint<std::uint32_t>(tileData);
+
+            if (!child.hasScalarType() || child.getScalarType().getPhysicalType() != ScalarType::STRING) {
+                throw std::runtime_error("Currently only string fields are implemented for a struct");
             }
 
-            const auto presentStreamMetadata = metadata::stream::StreamMetadata::decode(tileData);
-            const auto presentValueCount = presentStreamMetadata->getNumValues();
+            if (childStreams == 0) {
+                // column with all null values, skip
+                results.emplace(column.name + child.name, PresentProperties{ScalarType::STRING, {}, {}});
+                continue;
+            }
+
             PackedBitset presentStream;
-            rle::decodeBoolean(tileData, presentStream, *presentStreamMetadata, /*consume=*/true);
-            if ((presentValueCount + 7) / 8 != presentStream.size()) {
-                throw std::runtime_error("invalid present stream");
+            if (child.nullable) {
+                const auto presentStreamMetadata = metadata::stream::StreamMetadata::decode(tileData);
+                const auto presentValueCount = presentStreamMetadata->getNumValues();
+                rle::decodeBoolean(tileData, presentStream, *presentStreamMetadata, /*consume=*/true);
+                if ((presentValueCount + 7) / 8 != presentStream.size()) {
+                    throw std::runtime_error("invalid present stream");
+                }
             }
 
             const auto dataStreamMetadata = metadata::stream::StreamMetadata::decode(tileData);
@@ -171,26 +170,19 @@ public:
             intDecoder.decodeIntStream<std::uint32_t>(tileData, dataReferenceStream, *dataStreamMetadata);
 
             std::vector<std::string_view> propertyValues;
-            propertyValues.reserve(presentValueCount);
+            propertyValues.reserve(dataReferenceStream.size());
 
-            std::uint32_t counter = 0;
-            for (std::uint32_t i = 0; i < presentValueCount; ++i) {
-                if (testBit(presentStream, i)) {
-                    if (counter >= dataReferenceStream.size()) {
-                        throw std::runtime_error("StringDecoder: dataReferenceStream out of bounds");
-                    }
-                    auto dictIndex = dataReferenceStream[counter++];
-                    if (dictIndex >= dictionaryViews.size()) {
-                        throw std::runtime_error("StringDecoder: dictionaryViews index out of bounds");
-                    }
-                    propertyValues.push_back(dictionaryViews[dictIndex]);
+            for (auto dictIndex : dataReferenceStream) {
+                if (dictIndex >= dictionaryViews.size()) {
+                    throw std::runtime_error("StringDecoder: dictionaryViews index out of bounds");
                 }
+                propertyValues.push_back(dictionaryViews[dictIndex]);
             }
 
             results.emplace(column.name + child.name,
                             PresentProperties{child.getScalarType().getPhysicalType(),
                                               StringDictViews(dictionaryStream, propertyValues),
-                                              std::move(presentStream)});
+                                              presentStream});
         }
 
         return results;
@@ -272,11 +264,11 @@ private:
 
     static void decodePlain(const std::vector<std::uint32_t>& lengthStream,
                             const std::vector<std::uint8_t>& utf8bytes,
-                            std::vector<std::string_view>& out,
-                            std::uint32_t numValues) {
+                            std::vector<std::string_view>& out) {
         std::size_t dataOffset = 0;
         std::size_t lengthOffset = 0;
-        for (std::uint32_t i = 0; i < numValues; ++i) {
+        out.reserve(lengthStream.size());
+        for (std::uint32_t i = 0; i < lengthStream.size(); ++i) {
             const auto length = lengthStream[lengthOffset++];
             const char* bytes = reinterpret_cast<std::string::const_pointer>(utf8bytes.data() + dataOffset);
             out.push_back(view(bytes, length));
@@ -299,8 +291,7 @@ private:
     static void decodeDictionary(const std::vector<std::uint32_t>& lengthStream,
                                  const std::vector<std::uint8_t>& utf8bytes,
                                  const std::vector<std::uint32_t>& offsets,
-                                 std::vector<std::string_view>& out,
-                                 std::uint32_t numValues) {
+                                 std::vector<std::string_view>& out) {
         const auto* const utf8Ptr = reinterpret_cast<const char*>(utf8bytes.data());
 
         std::vector<std::string_view> dictionary;
@@ -312,9 +303,9 @@ private:
             dictionaryOffset += length;
         }
 
-        std::size_t offsetIndex = 0;
-        for (std::uint32_t i = 0; i < numValues; ++i) {
-            out.push_back(dictionary[offsets[offsetIndex++]]);
+        out.reserve(offsets.size());
+        for (const auto offset : offsets) {
+            out.push_back(dictionary[offset]);
         }
     }
 };

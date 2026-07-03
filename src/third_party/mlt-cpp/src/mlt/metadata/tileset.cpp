@@ -5,7 +5,13 @@
 #include <mlt/util/stl.hpp>
 #include <mlt/util/varint.hpp>
 
+#include <cstdint>
+#include <optional>
+#include <stdexcept>
+#include <string>
 #include <utility>
+#include <variant>
+#include <vector>
 
 namespace mlt::metadata::tileset {
 using util::decoding::decodeVarint;
@@ -34,7 +40,10 @@ Column decodeColumn(BufferStream& tileData) {
     }
 
     if (type_map::Tag0x01::columnTypeHasChildren(typeCode)) {
-        assert(column->hasComplexType());
+        if (!column->hasComplexType()) {
+            throw std::runtime_error(
+                "Column type code indicates children but decoded column does not have complex type");
+        }
         auto& complex = column->getComplexType();
         const auto childCount = decodeVarint<std::uint32_t>(tileData);
         complex.children = util::generateVector<Column>(childCount, [&](auto) { return decodeColumn(tileData); });
@@ -46,6 +55,9 @@ Column decodeColumn(BufferStream& tileData) {
 
 FeatureTable decodeFeatureTable(BufferStream& tileData) {
     auto name = decodeString(tileData);
+    if (name.empty()) {
+        throw std::runtime_error("Missing layer name");
+    }
     const auto extent = decodeVarint<std::uint32_t>(tileData);
     const auto columnCount = decodeVarint<std::uint32_t>(tileData);
     auto columns = util::generateVector<Column>(columnCount, [&](auto) { return decodeColumn(tileData); });

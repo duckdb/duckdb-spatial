@@ -1,9 +1,27 @@
 #include <mlt/geometry_vector.hpp>
 
 #include <mlt/coordinate.hpp>
-#include <mlt/polyfill.hpp>
+#include <mlt/geometry.hpp>
+#include <mlt/metadata/tileset.hpp>
+#include <mlt/polyfill.hpp> // NOLINT(misc-include-cleaner)
 #include <mlt/util/morton_curve.hpp>
-#include <mlt/util/stl.hpp>
+
+#include <cassert>
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+#ifndef NDEBUG
+#include <algorithm>
+#include <iterator>
+#endif
+
+// NOLINTBEGIN(bugprone-unchecked-optional-access)
 
 namespace mlt::geometry {
 
@@ -13,7 +31,7 @@ constexpr void checkBuffer(std::size_t index, std::size_t size, std::string_view
         throw std::runtime_error(std::string(name) + " underflow");
     }
 }
-#define CHECK_BUFFER(I, B) checkBuffer(I, B.size(), #B)
+#define CHECK_BUFFER(I, B) checkBuffer(I, (B).size(), #B)
 
 inline Coordinate coord(std::int32_t x, std::int32_t y) {
     return {static_cast<float>(x), static_cast<float>(y)};
@@ -76,7 +94,6 @@ std::vector<Coordinate> getMortonEncodedLineStringCoords(const std::vector<std::
     }
     return coords;
 }
-
 } // namespace
 
 void GeometryVector::applyTriangles(Geometry& geom,
@@ -95,13 +112,6 @@ void GeometryVector::applyTriangles(Geometry& geom,
         assert(std::all_of(std::next(indexBuffer.cbegin(), indexBufferOffset),
                            std::next(indexBuffer.cbegin(), indexBufferOffset + (3 * numTriangles)),
                            [=](auto i) { return i < totalVertices; }));
-#if !defined(NDEBUG) && false
-        // Expect the tessellated indexes to reference the entire range of vertices.
-        // The Java implementation of Earcut makes this fail, so it's disabled for now.
-        const auto limits = std::ranges::minmax_element(&indexBuffer[indexBufferOffset],
-                                                        &indexBuffer[indexBufferOffset + (3 * numTriangles)]);
-        assert(*limits.min == 0 && *limits.max == totalVertices - 1);
-#endif
         geom.setTriangles({&indexBuffer[indexBufferOffset], 3 * numTriangles});
         indexBufferOffset += 3 * numTriangles;
     }
@@ -184,6 +194,9 @@ std::vector<std::unique_ptr<Geometry>> GeometryVector::getGeometries(const Geome
                     }
                     geometries.push_back(factory.createMultiPoint(std::move(vertices)));
                 }
+
+                partOffsetCounter += numPoints;
+                ringOffsetsCounter += numPoints;
                 break;
             }
             case GeometryType::LINESTRING: {
@@ -534,3 +547,5 @@ std::vector<std::unique_ptr<Geometry>> GeometryVector::getGeometries(const Geome
 }
 
 } // namespace mlt::geometry
+
+// NOLINTEND(bugprone-unchecked-optional-access)

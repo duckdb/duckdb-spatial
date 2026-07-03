@@ -82,8 +82,9 @@ auto decodeVarints(BufferStream& buffer) {
     auto v = std::make_tuple(static_cast<T>(decodeVarint<std::uint32_t>(buffer)));
     if constexpr (N == 1) {
         return v;
-    } else
+    } else {
         return std::tuple_cat(std::move(v), decodeVarints<T, N - 1>(buffer));
+    }
 }
 
 /// Decode N varints into the provided buffer

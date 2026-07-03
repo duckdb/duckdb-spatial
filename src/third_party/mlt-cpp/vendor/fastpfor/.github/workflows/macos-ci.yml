@@ -4,16 +4,23 @@ on: [push, pull_request]
 
 jobs:
   macos-build:
+    name: macos (${{ matrix.simd_mode }})
     runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        simd_mode: [portable, native]
+
     steps:
-      - uses: actions/checkout@v2
-      - name: Use cmake (default)
+      - uses: actions/checkout@v6
+      - name: Build and test (Release, ${{ matrix.simd_mode }})
         run: |
-          cmake -B build -D CMAKE_BUILD_TYPE=Release
+          cmake -B build -D CMAKE_BUILD_TYPE=Release -D FASTPFOR_SIMD_MODE=${{ matrix.simd_mode }}
           cmake --build build
           ctest --test-dir build --output-on-failure
-      - name: Use cmake (debug)
+      - name: Build and test (Debug, ${{ matrix.simd_mode }})
         run: |
-          cmake -B build  -D CMAKE_BUILD_TYPE=Debug
+          rm -rf build
+          cmake -B build -D CMAKE_BUILD_TYPE=Debug -D FASTPFOR_SIMD_MODE=${{ matrix.simd_mode }}
           cmake --build build
           ctest --test-dir build --output-on-failure

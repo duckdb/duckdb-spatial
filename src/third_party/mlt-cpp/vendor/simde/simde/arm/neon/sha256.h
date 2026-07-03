@@ -33,10 +33,10 @@ HEDLEY_DIAGNOSTIC_PUSH
 SIMDE_DISABLE_UNWANTED_DIAGNOSTICS
 SIMDE_BEGIN_DECLS_
 
-#define ROR32(operand, shift) (((operand) >> (shift)) | ((operand) << (32-shift)))
-#define ROL32(operand, shift) (((operand) >> (32-shift)) | ((operand) << (shift)))
-#define LSR(operand, shift) ((operand) >> (shift))
-#define LSL(operand, shift) ((operand) << (shift))
+#define SIMDE_ROR32(operand, shift) (((operand) >> (shift)) | ((operand) << (32-shift)))
+#define SIMDE_ROL32(operand, shift) (((operand) >> (32-shift)) | ((operand) << (shift)))
+#define SIMDE_LSR(operand, shift) ((operand) >> (shift))
+#define SIMDE_LSL(operand, shift) ((operand) << (shift))
 
 static uint32_t simde_SHAchoose(uint32_t x, uint32_t y, uint32_t z) {
   return (((y ^ z) & x) ^ z);
@@ -47,11 +47,11 @@ static uint32_t simde_SHAmajority(uint32_t x, uint32_t y, uint32_t z) {
 }
 
 static uint32_t simde_SHAhashSIGMA0(uint32_t x) {
-  return ROR32(x, 2) ^ ROR32(x, 13) ^ ROR32(x, 22);
+  return SIMDE_ROR32(x, 2) ^ SIMDE_ROR32(x, 13) ^ SIMDE_ROR32(x, 22);
 }
 
 static uint32_t simde_SHAhashSIGMA1(uint32_t x) {
-  return ROR32(x, 6) ^ ROR32(x, 11) ^ ROR32(x, 25);
+  return SIMDE_ROR32(x, 6) ^ SIMDE_ROR32(x, 11) ^ SIMDE_ROR32(x, 25);
 }
 
 static simde_uint32x4_t
@@ -90,7 +90,8 @@ simde_vsha256hq_u32(simde_uint32x4_t hash_efgh, simde_uint32x4_t hash_abcd, simd
     return x_simde_sha256hash(hash_efgh, hash_abcd, wk, 1);
   #endif
 }
-#if defined(SIMDE_ARM_NEON_A32V8_ENABLE_NATIVE_ALIASES)
+#if defined(SIMDE_ARM_NEON_A32V8_ENABLE_NATIVE_ALIASES) || (defined(SIMDE_ENABLE_NATIVE_ALIASES) && \
+    !defined(SIMDE_ARCH_ARM_SHA2))
   #undef vsha256hq_u32
   #define vsha256hq_u32(hash_efgh, hash_abcd, wk) simde_vsha256hq_u32((hash_efgh), (hash_abcd), (wk))
 #endif
@@ -104,7 +105,8 @@ simde_vsha256h2q_u32(simde_uint32x4_t hash_efgh, simde_uint32x4_t hash_abcd, sim
     return x_simde_sha256hash(hash_abcd, hash_efgh, wk, 0);
   #endif
 }
-#if defined(SIMDE_ARM_NEON_A32V8_ENABLE_NATIVE_ALIASES)
+#if defined(SIMDE_ARM_NEON_A32V8_ENABLE_NATIVE_ALIASES) || (defined(SIMDE_ENABLE_NATIVE_ALIASES) && \
+    !defined(SIMDE_ARCH_ARM_SHA2))
   #undef vsha256h2q_u32
   #define vsha256h2q_u32(hash_efgh, hash_abcd, wk) simde_vsha256h2q_u32((hash_efgh), (hash_abcd), (wk))
 #endif
@@ -127,14 +129,15 @@ simde_vsha256su0q_u32(simde_uint32x4_t w0_3, simde_uint32x4_t w4_7) {
     uint32_t elt;
     for(int i = 0; i < 4; ++i) {
       elt = T_.values[i];
-      elt = ROR32(elt, 7) ^ ROR32(elt, 18) ^ LSR(elt, 3);
+      elt = SIMDE_ROR32(elt, 7) ^ SIMDE_ROR32(elt, 18) ^ SIMDE_LSR(elt, 3);
       r_.values[i] = elt + x_.values[i];
     }
     return simde_uint32x4_from_private(r_);
 
   #endif
 }
-#if defined(SIMDE_ARM_NEON_A32V8_ENABLE_NATIVE_ALIASES)
+#if defined(SIMDE_ARM_NEON_A32V8_ENABLE_NATIVE_ALIASES) || (defined(SIMDE_ENABLE_NATIVE_ALIASES) && \
+    !defined(SIMDE_ARCH_ARM_SHA2))
   #undef vsha256su0q_u32
   #define vsha256su0q_u32(w0_3, w4_7) simde_vsha256su0q_u32((w0_3), (w4_7))
 #endif
@@ -161,7 +164,7 @@ simde_vsha256su1q_u32(simde_uint32x4_t tw0_3, simde_uint32x4_t w8_11, simde_uint
     T1_.values[0] = z_.values[2];
     for(int i = 0; i < 2; ++i) {
       elt = T1_.values[i];
-      elt = ROR32(elt, 17) ^ ROR32(elt, 19) ^ LSR(elt, 10);
+      elt = SIMDE_ROR32(elt, 17) ^ SIMDE_ROR32(elt, 19) ^ SIMDE_LSR(elt, 10);
       elt = elt + x_.values[i] + T0_.values[i];
       r_.values[i] = elt;
     }
@@ -169,7 +172,7 @@ simde_vsha256su1q_u32(simde_uint32x4_t tw0_3, simde_uint32x4_t w8_11, simde_uint
     T1_.values[0] = r_.values[0];
     for(int i = 2; i < 4; ++i) {
       elt = T1_.values[i-2];
-      elt = ROR32(elt, 17) ^ ROR32(elt, 19) ^ LSR(elt, 10);
+      elt = SIMDE_ROR32(elt, 17) ^ SIMDE_ROR32(elt, 19) ^ SIMDE_LSR(elt, 10);
       elt = elt + x_.values[i] + T0_.values[i];
       r_.values[i] = elt;
     }
@@ -177,15 +180,16 @@ simde_vsha256su1q_u32(simde_uint32x4_t tw0_3, simde_uint32x4_t w8_11, simde_uint
 
   #endif
 }
-#if defined(SIMDE_ARM_NEON_A32V8_ENABLE_NATIVE_ALIASES)
+#if defined(SIMDE_ARM_NEON_A32V8_ENABLE_NATIVE_ALIASES) || (defined(SIMDE_ENABLE_NATIVE_ALIASES) && \
+    !defined(SIMDE_ARCH_ARM_SHA2))
   #undef vsha256su1q_u32
   #define vsha256su1q_u32(tw0_3, w8_11, w12_15) simde_vsha256su1q_u32((tw0_3), (w8_11), (w12_15))
 #endif
 
-#undef ROR32
-#undef ROL32
-#undef LSR
-#undef LSL
+#undef SIMDE_ROR32
+#undef SIMDE_ROL32
+#undef SIMDE_LSR
+#undef SIMDE_LSL
 
 SIMDE_END_DECLS_
 HEDLEY_DIAGNOSTIC_POP

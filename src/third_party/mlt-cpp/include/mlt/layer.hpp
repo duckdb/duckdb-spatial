@@ -10,7 +10,7 @@ namespace mlt {
 
 namespace geometry {
 struct GeometryVector;
-}
+} // namespace geometry
 
 class Layer : public util::noncopyable {
 public:

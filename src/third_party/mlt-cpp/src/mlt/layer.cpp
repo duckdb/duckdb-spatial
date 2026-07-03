@@ -1,5 +1,13 @@
 #include <mlt/layer.hpp>
+
+#include <mlt/feature.hpp>
 #include <mlt/geometry_vector.hpp>
+#include <mlt/properties.hpp>
+
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace mlt {
 

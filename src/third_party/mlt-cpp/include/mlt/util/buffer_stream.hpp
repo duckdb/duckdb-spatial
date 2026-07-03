@@ -12,7 +12,7 @@ namespace mlt {
 struct BufferStream : public util::noncopyable {
     BufferStream() = delete;
     BufferStream(DataView data_) noexcept
-        : data(std::move(data_)),
+        : data(data_),
           offset(0) {}
     BufferStream(BufferStream&&) = delete;
     BufferStream& operator=(BufferStream&&) = delete;
@@ -33,7 +33,7 @@ struct BufferStream : public util::noncopyable {
 
     void reset() { offset = 0; }
     void reset(DataView data_) {
-        data = std::move(data_);
+        data = data_;
         offset = 0;
     }
 

@@ -9,7 +9,7 @@
 
 namespace mlt::metadata::stream {
 class StreamMetadata;
-}
+} // namespace mlt::metadata::stream
 
 namespace mlt::util::decoding::rle {
 
@@ -37,7 +37,7 @@ public:
                 readHeader();
             }
             // how many do we read out of this block?
-            size_t count = std::min(static_cast<size_t>(numValues - position), remainingValues);
+            const size_t count = std::min(static_cast<size_t>(numValues - position), remainingValues);
             uint64_t consumed = 0;
             if (repeating) {
                 std::fill_n(data + position, count, value);
@@ -45,8 +45,8 @@ public:
             } else {
                 uint64_t i = 0;
                 while (i < count) {
-                    uint64_t copyBytes = std::min(static_cast<uint64_t>(count - i),
-                                                  static_cast<uint64_t>(bufferEnd - bufferStart));
+                    const uint64_t copyBytes = std::min(static_cast<uint64_t>(count - i),
+                                                        static_cast<uint64_t>(bufferEnd - bufferStart));
                     std::copy(bufferStart, bufferStart + copyBytes, data + position + i);
                     if (!copyBytes) {
                         // prevent infinite loop
@@ -121,7 +121,7 @@ void decodeInt(
     TTarget* const out,
     const std::size_t outCount,
     const std::uint32_t numRuns,
-    std::function<TTarget(T)> convert = [](T x) { return static_cast<TTarget>(x); }) {
+    const std::function<TTarget(T)>& convert = [](T x) { return static_cast<TTarget>(x); }) {
     std::uint32_t inOffset = 0;
     std::uint32_t outOffset = 0;
     for (std::uint32_t i = 0; i < numRuns; ++i) {

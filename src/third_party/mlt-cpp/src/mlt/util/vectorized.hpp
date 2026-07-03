@@ -6,7 +6,7 @@
 #include <type_traits>
 
 namespace mlt::util::decoding::vectorized {
-namespace {
+namespace detail {
 /// JS/Java `>>>`
 template <int bits, typename T>
     requires(std::integral<T>)
@@ -27,11 +27,12 @@ T shift_and_xor(T t) {
     return unsigned_rshift<1>(t) ^ odd_sign(t);
 }
 
-} // namespace
+} // namespace detail
 
 template <typename T>
     requires(std::is_integral_v<T> && sizeof(T) == 4)
 inline void decodeComponentwiseDeltaVec2(T* const data, const std::size_t count) noexcept {
+    using namespace detail;
     assert((count % 2) == 0);
     if (1 < count) {
         data[0] = shift_and_xor(data[0]);

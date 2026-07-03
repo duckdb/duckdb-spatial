@@ -3,6 +3,10 @@
 #include <algorithm>
 #include <cstddef>
 #include <iterator>
+#include <numeric>
+#include <ranges>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace mlt::util {
@@ -20,10 +24,19 @@ std::vector<T> generateVector(const std::size_t count, F generator) {
     return result;
 }
 
+/// Sum projected values in a range.
+template <std::ranges::input_range Range, typename Proj>
+auto sum(const Range& values, Proj proj) {
+    using TValue = std::decay_t<std::invoke_result_t<Proj, std::ranges::range_reference_t<Range>>>;
+    return std::accumulate(values.begin(), values.end(), TValue{}, [&](TValue sum, const auto& value) {
+        return sum + static_cast<TValue>(proj(value));
+    });
+}
+
 // Helper for using lambdas with `std::variant`
 // See https://en.cppreference.com/w/cpp/utility/variant/visit
 template <class... Ts>
-struct overloaded : Ts... {
+struct overloaded : Ts... { // NOLINT(misc-multiple-inheritance)
     using Ts::operator()...;
 };
 

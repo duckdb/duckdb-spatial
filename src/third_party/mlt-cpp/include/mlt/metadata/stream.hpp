@@ -5,13 +5,13 @@
 #include <mlt/util/noncopyable.hpp>
 #include <mlt/util/varint.hpp>
 
-#include <optional>
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace mlt::metadata::stream {
 
-enum class DictionaryType : std::uint32_t {
+enum class DictionaryType : std::uint8_t {
     NONE = 0,
     SINGLE = 1,
     SHARED = 2,
@@ -21,7 +21,7 @@ enum class DictionaryType : std::uint32_t {
     VALUE_COUNT = 6,
 };
 
-enum class LengthType : std::uint32_t {
+enum class LengthType : std::uint8_t {
     VAR_BINARY = 0,
     GEOMETRIES = 1,
     PARTS = 2,
@@ -32,7 +32,7 @@ enum class LengthType : std::uint32_t {
     VALUE_COUNT = 7,
 };
 
-enum class PhysicalLevelTechnique : std::uint32_t {
+enum class PhysicalLevelTechnique : std::uint8_t {
     NONE = 0,
     /// Preferred, tends to produce the best compression ratio and decoding performance.
     /// But currently limited to 32-bit integer.
@@ -40,12 +40,10 @@ enum class PhysicalLevelTechnique : std::uint32_t {
     /// Can produce better results in combination with a heavyweight compression scheme like Gzip.
     /// Simple compression scheme where the decoder are easier to implement compared to FastPfor.
     VARINT = 2,
-    /// Adaptive Lossless floating-Point Compression
-    ALP = 3,
-    VALUE_COUNT = 4,
+    VALUE_COUNT = 3,
 };
 
-enum class LogicalLevelTechnique : std::uint32_t {
+enum class LogicalLevelTechnique : std::uint8_t {
     NONE = 0,
     DELTA = 1,
     COMPONENTWISE_DELTA = 2,
@@ -55,7 +53,7 @@ enum class LogicalLevelTechnique : std::uint32_t {
     VALUE_COUNT = 6,
 };
 
-enum class OffsetType : std::uint32_t {
+enum class OffsetType : std::uint8_t {
     VERTEX = 0,
     INDEX = 1,
     STRING = 2,
@@ -63,7 +61,7 @@ enum class OffsetType : std::uint32_t {
     VALUE_COUNT = 4,
 };
 
-enum class PhysicalStreamType : std::uint32_t {
+enum class PhysicalStreamType : std::uint8_t {
     PRESENT = 0,
     DATA = 1,
     OFFSET = 2,
@@ -73,11 +71,11 @@ enum class PhysicalStreamType : std::uint32_t {
 
 class LogicalStreamType : public util::noncopyable {
 public:
-    LogicalStreamType(DictionaryType type) noexcept
+    explicit LogicalStreamType(DictionaryType type) noexcept
         : dictionaryType(type) {}
-    LogicalStreamType(OffsetType type) noexcept
+    explicit LogicalStreamType(OffsetType type) noexcept
         : offsetType(type) {}
-    LogicalStreamType(LengthType type) noexcept
+    explicit LogicalStreamType(LengthType type) noexcept
         : lengthType(type) {}
 
     LogicalStreamType() = delete;
@@ -190,7 +188,7 @@ public:
 
     static RleEncodedStreamMetadata decodePartial(StreamMetadata&& streamMetadata, BufferStream& tileData) {
         const auto [runs, numValues] = util::decoding::decodeVarints<std::uint32_t, 2>(tileData);
-        return RleEncodedStreamMetadata(std::move(streamMetadata), runs, numValues);
+        return {std::move(streamMetadata), runs, numValues};
     }
 
     static RleEncodedStreamMetadata decode(BufferStream& tileData) {
@@ -237,7 +235,7 @@ public:
 
     static MortonEncodedStreamMetadata decodePartial(StreamMetadata&& streamMetadata, BufferStream& tileData) {
         const auto [numBits, coordShift] = util::decoding::decodeVarints<std::uint32_t, 2>(tileData);
-        return MortonEncodedStreamMetadata(std::move(streamMetadata), numBits, coordShift);
+        return {std::move(streamMetadata), static_cast<int>(numBits), static_cast<int>(coordShift)};
     }
 
     static MortonEncodedStreamMetadata decode(BufferStream& tileData) {

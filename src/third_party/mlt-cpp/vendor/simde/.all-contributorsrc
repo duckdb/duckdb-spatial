@@ -734,6 +734,55 @@
         "bug",
         "code"
       ]
+    },
+    {
+      "login": "AymenQ",
+      "name": "Aymen Qader",
+      "avatar_url": "https://avatars.githubusercontent.com/u/3706283?v=4",
+      "profile": "https://github.com/AymenQ",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "eric900115",
+      "name": "Eric Su",
+      "avatar_url": "https://avatars.githubusercontent.com/u/77781328?v=4",
+      "profile": "https://github.com/eric900115",
+      "contributions": [
+        "code",
+        "platform"
+      ]
+    },
+    {
+      "login": "Torinde",
+      "name": "Torinde",
+      "avatar_url": "https://avatars.githubusercontent.com/u/97228894?v=4",
+      "profile": "https://github.com/Torinde",
+      "contributions": [
+        "bug",
+        "doc",
+        "ideas"
+      ]
+    },
+    {
+      "login": "howjmay",
+      "name": "Yang Hau",
+      "avatar_url": "https://avatars.githubusercontent.com/u/13924801?v=4",
+      "profile": "https://www.linkedin.com/in/yanghauyuan/",
+      "contributions": [
+        "code",
+        "ideas"
+      ]
+    },
+    {
+      "login": "zengdage",
+      "name": "Zhijin Zeng",
+      "avatar_url": "https://avatars.githubusercontent.com/u/16076103?v=4",
+      "profile": "https://github.com/zengdage",
+      "contributions": [
+        "code"
+      ]
     }
   ],
   "contributorsPerLine": 7

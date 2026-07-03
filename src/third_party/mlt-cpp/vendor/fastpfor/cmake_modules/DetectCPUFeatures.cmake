@@ -30,7 +30,7 @@ return _mm256_movemask_epi8(x);
 }")
 
 if(MSVC)
-	message(STATUS "TEST 2")
+	message(STATUS "Detecting CPU features (MSVC)")
 	set(CMAKE_REQUIRED_FLAGS "/EHsc /arch:SSE2")
 	check_cxx_source_compiles("${SSE4PROG}" SUPPORT_SSE42)
 	message(STATUS "SUPPORT_SSE42 ${SUPPORT_SSE42}")
@@ -41,11 +41,13 @@ if(MSVC)
 	check_cxx_source_compiles("${AVX2PROG}" SUPPORT_AVX2)
 	message(STATUS "SUPPORT_AVX2 ${SUPPORT_AVX2}")
 else()
-	set(CMAKE_REQUIRED_FLAGS "-march=native -msse4.2")
+	# Test compiler support for SIMD instruction sets
+	# Note: This tests compiler capability, not runtime CPU support
+	set(CMAKE_REQUIRED_FLAGS "-msse4.2")
 	check_cxx_source_compiles("${SSE4PROG}" SUPPORT_SSE42)
-	set(CMAKE_REQUIRED_FLAGS "-march=native -mavx")
+	set(CMAKE_REQUIRED_FLAGS "-mavx")
 	check_cxx_source_compiles("${AVXPROG}" SUPPORT_AVX)
-	set(CMAKE_REQUIRED_FLAGS "-march=native -mavx2")
+	set(CMAKE_REQUIRED_FLAGS "-mavx2")
 	check_cxx_source_compiles("${AVX2PROG}" SUPPORT_AVX2)
 endif()	
 

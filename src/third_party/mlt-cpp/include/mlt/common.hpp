@@ -22,6 +22,6 @@ struct underlying_type {
 template <typename T>
 struct underlying_type<T, true> : ::std::underlying_type<T> {};
 template <class T>
-using underlying_type_t = typename underlying_type<T>::type;
+using underlying_type_t = underlying_type<T>::type;
 
 } // namespace mlt

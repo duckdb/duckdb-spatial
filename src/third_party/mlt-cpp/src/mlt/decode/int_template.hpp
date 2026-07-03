@@ -69,8 +69,16 @@ void IntegerDecoder::decodeIntArray(const T* values,
                 }
                 const auto& rleMetadata = static_cast<const RleEncodedStreamMetadata&>(streamMetadata);
                 assert(outCount >= rleMetadata.getNumRleValues());
-                rle::decodeInt<T, TTarget>(values, count, out, outCount, rleMetadata.getRuns());
-                decodeZigZagDelta(out, outCount, out, outCount);
+                if constexpr (sizeof(T) == sizeof(TTarget)) {
+                    rle::decodeInt<T, TTarget>(values, count, out, outCount, rleMetadata.getRuns());
+                    decodeZigZagDelta(out, outCount, out, outCount);
+                } else {
+                    // Expand the runs at the column width, not the wider target width.
+                    // The delta has to wrap at the column width before it is widened.
+                    auto rleBuffer = getTempBuffer<T>(outCount);
+                    rle::decodeInt<T, T>(values, count, rleBuffer.get(), outCount, rleMetadata.getRuns());
+                    decodeZigZagDelta<T, TTarget>(rleBuffer.get(), outCount, out, outCount);
+                }
             } else {
                 assert(outCount >= count);
                 decodeZigZagDelta(values, count, out, outCount);
@@ -126,7 +134,7 @@ void IntegerDecoder::decodeIntStream(BufferStream& tileData,
                                      std::vector<TTarget>& out,
                                      const StreamMetadata& metadata,
                                      const bool isSigned) {
-    auto* tempBuffer = getTempBuffer<TInt>(metadata.getNumValues());
+    auto tempBuffer = getTempBuffer<TInt>(metadata.getNumValues());
     decodeIntStream<TDecode, TInt, TTarget>(tileData, tempBuffer, metadata.getNumValues(), out, metadata, isSigned);
 }
 
@@ -163,7 +171,7 @@ template <typename TDecode, typename TInt, typename TTarget, bool Delta>
 void IntegerDecoder::decodeMortonStream(BufferStream& tileData,
                                         std::vector<TTarget>& out,
                                         const MortonEncodedStreamMetadata& metadata) {
-    auto* tempBuffer = getTempBuffer<TInt>(metadata.getNumValues());
+    auto tempBuffer = getTempBuffer<TInt>(metadata.getNumValues());
     out.resize(2 * metadata.getNumValues());
     decodeMortonStream<TDecode, TInt, TTarget, Delta>(
         tileData, tempBuffer, metadata.getNumValues(), out.data(), out.size(), metadata);
@@ -199,20 +207,18 @@ void IntegerDecoder::decodeStream(BufferStream& tileData,
     switch (metadata.getPhysicalLevelTechnique()) {
         case PhysicalLevelTechnique::FAST_PFOR: {
             std::uint32_t* outPtr = nullptr;
+            std::optional<BufWrapper<std::uint32_t>> tempBuffer; // NOLINT(misc-const-correctness)
             if constexpr (sizeof(*out) == sizeof(std::uint32_t)) {
                 // Decode directly into the output buffer
                 outPtr = reinterpret_cast<std::uint32_t*>(out);
             } else {
-                // Decode into a 32-bit temprary buffer
-                outPtr = getTempBuffer<std::uint32_t>(metadata.getNumValues());
+                // Decode into a 32-bit temprary buffer ...
+                tempBuffer.emplace(getTempBuffer<std::uint32_t>(metadata.getNumValues()));
+                outPtr = tempBuffer->get();
             }
 
             const auto resultLength = decodeFastPfor(
                 tileData, outPtr, metadata.getNumValues(), metadata.getByteLength());
-            if (resultLength != outSize) {
-                throw std::runtime_error("Unexpected decode result (" + std::to_string(resultLength) + "," +
-                                         std::to_string(outSize) + ")");
-            }
 
             if constexpr (sizeof(*out) != sizeof(std::uint32_t)) {
                 // ... then extend to 64-bit output (`.mapToLong(i -> i)` in Java)
@@ -267,15 +273,23 @@ template <typename T, typename TTarget>
 void IntegerDecoder::decodeZigZagDelta(const T* values,
                                        const std::size_t count,
                                        TTarget* const out,
-                                       const std::size_t outCount) noexcept {
+                                       [[maybe_unused]] const std::size_t outCount) noexcept {
     using namespace util::decoding;
     assert(count == outCount);
+
+    // Sum at the column width so the total wraps like it did when encoded.
+    // Unsigned makes the wrap well-defined.
+    using Unsigned = std::make_unsigned_t<underlying_type_t<T>>;
+    // Native carries the column's signedness back when widening to the target.
+    // Unsigned ids zero-extend; signed values sign-extend.
+    using Native = underlying_type_t<T>;
+
     std::uint32_t pos = 0;
-    using ST = std::make_signed_t<underlying_type_t<T>>;
-    ST previousValue = 0;
+    Unsigned runningTotal = 0;
     for (const auto zigZagDelta : std::span{values, count}) {
-        const auto delta = static_cast<ST>(decodeZigZag(zigZagDelta));
-        out[pos++] = static_cast<TTarget>(previousValue += delta);
+        runningTotal += static_cast<Unsigned>(decodeZigZag(zigZagDelta));
+        const auto value = static_cast<Native>(runningTotal);
+        out[pos++] = static_cast<TTarget>(value);
     }
 }
 
@@ -284,7 +298,7 @@ template <typename TDecode, typename TTarget, bool delta>
 void IntegerDecoder::decodeMortonCodes(const TDecode* const data,
                                        const std::size_t count,
                                        TTarget* const out,
-                                       std::size_t outCount,
+                                       [[maybe_unused]] std::size_t outCount,
                                        int numBits,
                                        int coordinateShift) noexcept {
     using namespace util::decoding;

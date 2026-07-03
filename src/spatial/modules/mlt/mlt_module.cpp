@@ -23,6 +23,8 @@
 #include <mlt/geometry.hpp>
 #include <mlt/properties.hpp>
 
+#include <optional>
+
 namespace duckdb {
 
 namespace {
@@ -471,7 +473,11 @@ struct ST_AsMLT {
 					default:
 						break;
 					}
+				} else {
+					feature.id = std::nullopt;
 				}
+			} else {
+				feature.id = std::nullopt;
 			}
 
 			// Properties
@@ -551,6 +557,7 @@ struct ST_AsMLT {
 
 		mlt::Encoder encoder;
 		mlt::EncoderConfig config;
+		config.includeIds = bdata.feature_id_column_idx.IsValid();
 
 		for (idx_t raw_idx = 0; raw_idx < count; raw_idx++) {
 			auto &state = *state_ptr[state_format.sel->get_index(raw_idx)];

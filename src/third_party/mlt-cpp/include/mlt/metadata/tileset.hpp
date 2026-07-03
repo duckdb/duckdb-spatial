@@ -1,28 +1,27 @@
 #pragma once
 
 #include <cstdint>
-#include <optional>
 #include <string>
 #include <variant>
 #include <vector>
 
 namespace mlt {
 struct BufferStream;
-}
+} // namespace mlt
 
 namespace mlt::metadata::tileset {
 
 // See https://maplibre.org/maplibre-tile-spec/specification/
 namespace schema {
 
-enum class ColumnScope {
+enum class ColumnScope : std::uint8_t {
     // 1:1 Mapping of property and feature -> id and geometry
     FEATURE = 0,
     // For M-Values -> 1:1 Mapping for property and vertex
     VERTEX = 1,
 };
 
-enum class ScalarType {
+enum class ScalarType : std::uint8_t {
     BOOLEAN = 0,
     INT_8 = 1,
     UINT_8 = 2,
@@ -35,7 +34,7 @@ enum class ScalarType {
     STRING = 9,
 };
 
-enum class ComplexType {
+enum class ComplexType : std::uint8_t {
     // vec2<Int32> for the VertexBuffer stream with additional information
     // (streams) about the topology
     GEOMETRY = 0,
@@ -44,7 +43,7 @@ enum class ComplexType {
     STRUCT = 1,
 };
 
-enum class LogicalScalarType {
+enum class LogicalScalarType : std::uint8_t {
     // uin32 or 64_t depending on hasLongID
     ID = 0,
 };
@@ -60,7 +59,8 @@ using schema::LogicalComplexType;
 using schema::LogicalScalarType;
 using schema::ScalarType;
 
-enum class GeometryType {
+// NOLINTNEXTLINE(performance-enum-size) - needs to be uint32 to be used with int decoder templates
+enum class GeometryType : std::uint32_t {
     POINT = 0,
     LINESTRING = 1,
     POLYGON = 2,

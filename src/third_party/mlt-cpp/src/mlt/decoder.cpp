@@ -1,16 +1,16 @@
 #include <mlt/decoder.hpp>
 
+#include <mlt/common.hpp>
 #include <mlt/decode/geometry.hpp>
 #include <mlt/decode/int.hpp>
-#include <mlt/decode/int_template.hpp>
 #include <mlt/decode/property.hpp>
 #include <mlt/decode/string.hpp>
-#include <mlt/geometry.hpp>
+#include <mlt/feature.hpp>
 #include <mlt/geometry_vector.hpp>
 #include <mlt/layer.hpp>
-#include <mlt/metadata/type_map.hpp>
 #include <mlt/metadata/stream.hpp>
 #include <mlt/metadata/tileset.hpp>
+#include <mlt/metadata/type_map.hpp>
 #include <mlt/properties.hpp>
 #include <mlt/tile.hpp>
 #include <mlt/util/buffer_stream.hpp>
@@ -19,8 +19,16 @@
 #include <mlt/util/stl.hpp>
 #include <mlt/util/varint.hpp>
 
+#include <algorithm>
 #include <cstddef>
+#include <cstdint>
+#include <iterator>
+#include <memory>
+#include <optional>
 #include <stdexcept>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace mlt {
 
@@ -28,11 +36,14 @@ using namespace decoder;
 using namespace util::decoding;
 
 struct Decoder::Impl {
-    Impl(std::unique_ptr<GeometryFactory>&& geometryFactory_)
-        : geometryFactory(std::move(geometryFactory_)) {}
+    Impl(std::unique_ptr<GeometryFactory>&& geometryFactory_, bool supportFastPFOR)
+        : integerDecoder(supportFastPFOR),
+          geometryDecoder(integerDecoder),
+          geometryFactory(std::move(geometryFactory_)) {}
 
     Layer parseBasicMVTEquivalent(BufferStream&);
-    std::vector<Feature> makeFeatures(const std::vector<Feature::id_t>&, std::vector<std::unique_ptr<Geometry>>&&);
+    static std::vector<Feature> makeFeatures(const std::vector<std::optional<Feature::id_t>>&,
+                                             std::vector<std::unique_ptr<Geometry>>&&);
 
     IntegerDecoder integerDecoder;
     StringDecoder stringDecoder{integerDecoder};
@@ -42,31 +53,50 @@ struct Decoder::Impl {
 };
 
 Layer Decoder::Impl::parseBasicMVTEquivalent(BufferStream& tileData) {
-    using metadata::stream::StreamMetadata;
-    using metadata::type_map::Tag0x01;
+    using mlt::metadata::stream::StreamMetadata;
+    using mlt::metadata::type_map::Tag0x01;
 
     const auto layerMetadata = mlt::metadata::tileset::decodeFeatureTable(tileData);
 
-    std::vector<Feature::id_t> ids;
+    std::vector<std::optional<Feature::id_t>> ids;
     std::unique_ptr<geometry::GeometryVector> geometryVector;
     PropertyVecMap properties;
 
     for (const auto& columnMetadata : layerMetadata.columns) {
         const auto numStreams = Tag0x01::hasStreamCount(columnMetadata) ? decodeVarint<std::uint32_t>(tileData) : 1;
         if (columnMetadata.isID()) {
+            PackedBitset idPresentBits;
+            std::uint32_t numFeaturesFromPresent = 0;
             if (columnMetadata.nullable) {
                 const auto presentStreamMetadata = StreamMetadata::decode(tileData);
-                // data ignored, don't decode it
-                tileData.consume(presentStreamMetadata->getByteLength());
+                numFeaturesFromPresent = presentStreamMetadata->getNumValues();
+                rle::decodeBoolean(tileData, idPresentBits, *presentStreamMetadata, /*consume=*/true);
             }
 
             const auto idDataStreamMetadata = StreamMetadata::decode(tileData);
 
-            ids.resize(idDataStreamMetadata->getNumValues());
+            std::vector<Feature::id_t> denseIds(idDataStreamMetadata->getNumValues());
             if (columnMetadata.getScalarType().hasLongID) {
-                integerDecoder.decodeIntStream<std::uint64_t>(tileData, ids, *idDataStreamMetadata);
+                integerDecoder.decodeIntStream<std::uint64_t>(tileData, denseIds, *idDataStreamMetadata);
             } else {
-                integerDecoder.decodeIntStream<std::uint32_t, std::uint64_t>(tileData, ids, *idDataStreamMetadata);
+                // Decode 32-bit ids at 32-bit width so delta math wraps there, then widen to id_t.
+                integerDecoder.decodeIntStream<std::uint32_t, std::uint32_t>(tileData, denseIds, *idDataStreamMetadata);
+            }
+
+            if (!idPresentBits.empty()) {
+                // Expand dense IDs to sparse optional IDs using the present bitset
+                ids.resize(numFeaturesFromPresent);
+                std::size_t denseIdx = 0;
+                for (std::uint32_t i = 0; i < numFeaturesFromPresent; ++i) {
+                    if (testBit(idPresentBits, i)) {
+                        ids[i] = denseIds[denseIdx++];
+                    }
+                }
+            } else {
+                ids.resize(denseIds.size());
+                for (std::size_t i = 0; i < denseIds.size(); ++i) {
+                    ids[i] = denseIds[i];
+                }
             }
         } else if (columnMetadata.isGeometry()) {
             geometryVector = geometryDecoder.decodeGeometryColumn(tileData, columnMetadata, numStreams);
@@ -91,23 +121,25 @@ Layer Decoder::Impl::parseBasicMVTEquivalent(BufferStream& tileData) {
             std::move(properties)};
 }
 
-std::vector<Feature> Decoder::Impl::makeFeatures(const std::vector<Feature::id_t>& ids,
+std::vector<Feature> Decoder::Impl::makeFeatures(const std::vector<std::optional<Feature::id_t>>& ids,
                                                  std::vector<std::unique_ptr<Geometry>>&& geometries) {
-    const auto featureCount = ids.size();
-    if (geometries.size() < featureCount) {
-        throw std::runtime_error("Invalid geometry count");
+    const auto featureCount = geometries.size();
+    if (!ids.empty() && ids.size() != featureCount) {
+        throw std::runtime_error("ID count (" + std::to_string(ids.size()) + ") does not match geometry count (" +
+                                 std::to_string(featureCount) + ")");
     }
 
     return util::generateVector<Feature>(featureCount, [&](const auto i) {
-        return Feature{ids[i], std::move(geometries[i]), static_cast<std::uint32_t>(i)};
+        const auto id = ids.empty() ? std::nullopt : ids[i];
+        return Feature{id, std::move(geometries[i]), static_cast<std::uint32_t>(i)};
     });
 }
 
-Decoder::Decoder()
-    : Decoder(std::make_unique<GeometryFactory>()) {}
+Decoder::Decoder(bool supportFastPFOR)
+    : Decoder(std::make_unique<GeometryFactory>(), supportFastPFOR) {}
 
-Decoder::Decoder(std::unique_ptr<GeometryFactory>&& geometryFactory)
-    : impl{std::make_unique<Impl>(std::move(geometryFactory))} {}
+Decoder::Decoder(std::unique_ptr<GeometryFactory>&& geometryFactory, bool supportFastPFOR)
+    : impl{std::make_unique<Impl>(std::move(geometryFactory), supportFastPFOR)} {}
 
 Decoder::~Decoder() noexcept = default;
 

@@ -1,8 +1,13 @@
 #include <mlt/util/rle.hpp>
 
 #include <mlt/metadata/stream.hpp>
+#include <mlt/util/buffer_stream.hpp>
 
+#include <algorithm>
 #include <cassert>
+#include <cstddef>
+#include <cstdint>
+#include <vector>
 
 namespace mlt::util::decoding::rle {
 

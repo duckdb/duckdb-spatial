@@ -152,6 +152,53 @@ It may be necessary to set the CXX variable. The project is installable (`make i
 
 To create project files for Microsoft Visual Studio, it might be useful to target 64-bit Windows (e.g., see http://www.cmake.org/cmake/help/v3.0/generator/Visual%20Studio%2012%202013.html).
 
+### CMake Options
+
+#### FASTPFOR_SIMD_MODE
+
+Controls how SIMD instructions are compiled. This affects portability and performance:
+
+| Mode | Flag | Description |
+|------|------|-------------|
+| `portable` | `-msse4.2` | **Default.** Compiles with SSE4.2 baseline only. Binaries will run on any x86-64 CPU from ~2008 onwards. Best for distributable libraries and CI builds. |
+| `native` | `-march=native` | Compiles with all SIMD instructions supported by the build machine (may include AVX, AVX2, AVX-512, etc.). Maximum performance but binaries may crash with `SIGILL` on CPUs that lack the required instructions. |
+| `runtime` | `-msse4.2` + `FASTPFOR_RUNTIME_DISPATCH` | Experimental. Intended for future runtime CPU dispatch using function multi-versioning. |
+
+**Usage:**
+
+```bash
+# Portable build (default) - safe for distribution
+cmake -B build -DFASTPFOR_SIMD_MODE=portable
+
+# Native build - maximum performance on build machine
+cmake -B build -DFASTPFOR_SIMD_MODE=native
+
+# Check which mode is active in CMake output
+cmake -B build
+# Look for: "FASTPFOR_SIMD_MODE: portable" in the output
+```
+
+**When to use each mode:**
+
+- Use `portable` (default) when building binaries that will run on different machines, in CI/CD pipelines, or when distributing pre-built libraries.
+- Use `native` when building for a specific machine where maximum performance is needed and you know the binary won't be moved to a different CPU.
+
+#### FASTPFOR_SANITIZE
+
+Enable address sanitizer for debugging memory issues:
+
+```bash
+cmake -B build -DFASTPFOR_SANITIZE=ON
+```
+
+#### FASTPFOR_WITH_TEST
+
+Build with Google Test (enabled by default):
+
+```bash
+cmake -B build -DFASTPFOR_WITH_TEST=OFF  # Disable tests
+```
+
 ### Multithreaded context
 
 You should not assume that our objects are thread safe.

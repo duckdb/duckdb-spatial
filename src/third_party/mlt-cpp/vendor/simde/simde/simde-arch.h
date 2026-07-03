@@ -130,6 +130,9 @@
 #if defined(__ARM_FEATURE_CRYPTO) && __ARM_FEATURE_CRYPTO
 #  define SIMDE_ARCH_ARM_CRYPTO
 #endif
+#if defined(__ARM_FEATURE_CRC32) && __ARM_FEATURE_CRC32
+#  define SIMDE_ARCH_ARM_CRC32
+#endif
 #if defined(__ARM_FEATURE_DOTPROD) && __ARM_FEATURE_DOTPROD
 #  define SIMDE_ARCH_ARM_DOTPROD
 #endif
@@ -538,7 +541,7 @@
 #if defined(__riscv_zve64d)
 #  define SIMDE_ARCH_RISCV_ZVE64D 1
 #endif
-#if defined(__riscv_v)
+#if defined(__riscv_v) || (defined(__riscv_zve64d) && defined(__riscv_zvl128b))
 #  define SIMDE_ARCH_RISCV_V 1
 #endif
 #if defined(__riscv_zvfh)
@@ -546,6 +549,9 @@
 #endif
 #if defined(__riscv_zvfhmin)
 #  define SIMDE_ARCH_RISCV_ZVFHMIN 1
+#endif
+#if defined(__riscv_zvlsseg) || defined(__riscv_v)
+#  define SIMDE_ARCH_RISCV_ZVLSSEG 1
 #endif
 
 /* SPARC

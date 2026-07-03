@@ -1,5 +1,7 @@
 #pragma once
 
+#include <algorithm>
+#include <iterator>
 #include <mlt/decode/int.hpp>
 #include <mlt/decode/string.hpp>
 #include <mlt/feature.hpp>
@@ -8,8 +10,8 @@
 #include <mlt/properties.hpp>
 #include <mlt/util/buffer_stream.hpp>
 #include <mlt/util/packed_bitset.hpp>
-#include <mlt/util/rle.hpp>
 #include <mlt/util/raw.hpp>
+#include <mlt/util/rle.hpp>
 
 #include <stdexcept>
 #include <string>
@@ -43,7 +45,7 @@ public:
     }
 
 protected:
-    void skipColumn(BufferStream& tileData, std::uint32_t numStreams) {
+    static void skipColumn(BufferStream& tileData, std::uint32_t numStreams) {
         using namespace metadata::stream;
         using namespace util::decoding;
 
@@ -76,6 +78,7 @@ protected:
             if ((presentValueCount + 7) / 8 != presentStream.size()) {
                 throw std::runtime_error("invalid present stream");
             }
+            numStreams -= 1;
         }
 
         const auto scalarColumn = std::get<ScalarColumn>(column.type);
@@ -84,34 +87,22 @@ protected:
         }
         const auto scalarType = scalarColumn.getPhysicalType();
 
-        // Everything but string has stream metadata.
+        // String stream metadata is read by StringDecoder
         std::unique_ptr<StreamMetadata> streamMetadata;
-        switch (scalarType) {
-            case ScalarType::BOOLEAN:
-            case ScalarType::INT_8:
-            case ScalarType::UINT_8:
-            case ScalarType::INT_32:
-            case ScalarType::UINT_32:
-            case ScalarType::INT_64:
-            case ScalarType::UINT_64:
-            case ScalarType::FLOAT:
-            case ScalarType::DOUBLE:
-                streamMetadata = StreamMetadata::decode(tileData);
-                break;
-            default:
-            case ScalarType::STRING:
-                // String always has present values stream.
-                if (!presentValueCount) {
-                    throw std::runtime_error("Missing present value column");
-                }
-                break;
+        if (scalarType != ScalarType::STRING) {
+            streamMetadata = StreamMetadata::decode(tileData);
         }
 
-        if (streamMetadata && presentValueCount && presentValueCount < streamMetadata->getNumValues()) {
+        // A single-value RLE run encodes as more ints than it decodes to.
+        // Compare the logical (decoded) count, not the raw stream length, to avoid a spurious throw.
+        if (column.nullable && streamMetadata &&
+            presentValueCount <
+                IntegerDecoder::getIntArrayBufferSize(streamMetadata->getNumValues(), *streamMetadata)) {
             throw std::runtime_error("Unexpected present value column");
         }
 
         const auto checkBits = [&](const auto& presentBuffer, const auto& propertyBuffer, bool isBoolean = false) {
+#ifndef NDEBUG
             if (!presentStream.empty()) {
                 const auto actualProperties = propertyCount(propertyBuffer, isBoolean);
                 const auto presentBits = countSetBits(presentBuffer);
@@ -121,7 +112,9 @@ protected:
                                              " doesn't match present bits " + std::to_string(presentBits));
                 }
             }
+#endif
         };
+
         switch (scalarType) {
             case ScalarType::BOOLEAN: {
                 std::vector<std::uint8_t> byteBuffer;
@@ -156,7 +149,7 @@ protected:
                 }
 
                 checkBits(presentStream, result);
-                return {scalarType, std::move(result), std::move(presentStream)};
+                return {scalarType, std::move(result), presentStream};
             }
             case ScalarType::INT_64: {
                 std::vector<std::int64_t> longBuffer;
@@ -166,7 +159,7 @@ protected:
 
                 PropertyVec result{std::move(longBuffer)};
                 checkBits(presentStream, result);
-                return {scalarType, std::move(result), std::move(presentStream)};
+                return {scalarType, std::move(result), presentStream};
             }
             case ScalarType::UINT_64: {
                 std::vector<std::uint64_t> longBuffer;
@@ -176,41 +169,43 @@ protected:
 
                 PropertyVec result{std::move(longBuffer)};
                 checkBits(presentStream, result);
-                return {scalarType, std::move(result), std::move(presentStream)};
+                return {scalarType, std::move(result), presentStream};
             }
-            case ScalarType::DOUBLE:
-            case ScalarType::FLOAT: {
-                const auto numValues = streamMetadata->getNumValues();
-                const auto byteLength = streamMetadata->getByteLength();
-                // Per spec, DOUBLE is 8 bytes and FLOAT is 4 bytes per value.
-                // Java encoder writes 4-byte floats even for DOUBLE columns;
-                // detect via byteLength and decode accordingly.
-                if (byteLength == numValues * sizeof(double)) {
-                    std::vector<double> doubleBuffer;
-                    doubleBuffer.reserve(numValues);
+            case ScalarType::DOUBLE: {
+                std::vector<double> doubleBuffer;
+                if (streamMetadata->getNumValues() * sizeof(double) == streamMetadata->getByteLength()) {
                     decodeRaw(tileData, doubleBuffer, *streamMetadata, /*consume=*/true);
-
-                    PropertyVec result{std::move(doubleBuffer)};
-                    checkBits(presentStream, result);
-                    return {scalarType, std::move(result), std::move(presentStream)};
                 } else {
+                    // Compatibility with tilesets encoded before double support was added
                     std::vector<float> floatBuffer;
-                    floatBuffer.reserve(numValues);
                     decodeRaw(tileData, floatBuffer, *streamMetadata, /*consume=*/true);
-
-                    PropertyVec result{std::move(floatBuffer)};
-                    checkBits(presentStream, result);
-                    return {scalarType, std::move(result), std::move(presentStream)};
+                    doubleBuffer.reserve(streamMetadata->getNumValues());
+                    std::ranges::transform(floatBuffer, std::back_inserter(doubleBuffer), [](float value) {
+                        return static_cast<double>(value);
+                    });
                 }
+
+                PropertyVec result{std::move(doubleBuffer)};
+                checkBits(presentStream, result);
+                return {scalarType, std::move(result), presentStream};
+            }
+            case ScalarType::FLOAT: {
+                std::vector<float> floatBuffer;
+                decodeRaw(tileData, floatBuffer, *streamMetadata, /*consume=*/true);
+
+                PropertyVec result{std::move(floatBuffer)};
+                checkBits(presentStream, result);
+                return {scalarType, std::move(result), presentStream};
             }
             case ScalarType::STRING: {
-                const auto stringCount = presentStream.empty() ? presentValueCount : countSetBits(presentStream);
-                // FIXME? why numStreams - 1? what if its not optional
-                auto strings = stringDecoder.decode(tileData, numStreams - 1, static_cast<std::uint32_t>(stringCount));
+                auto strings = stringDecoder.decode(tileData, numStreams);
+                if (column.nullable && countSetBits(presentStream) != strings.getStrings().size()) {
+                    throw std::runtime_error("String count doesn't match present value count");
+                }
 
                 PropertyVec result{std::move(strings)};
                 checkBits(presentStream, result);
-                return {scalarType, PropertyVec{std::move(result)}, std::move(presentStream)};
+                return {scalarType, PropertyVec{std::move(result)}, presentStream};
             }
             default:
                 throw std::runtime_error("Unknown scalar type: " + std::to_string(std::to_underlying(scalarType)));

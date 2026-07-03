@@ -112,8 +112,8 @@ private:
         x[1] = 0;
         for (std::uint32_t idx = 0; idx < length; ++idx) {
             if (d & (1u << idx)) {
-                int dim = static_cast<int>(length - idx - 1) % n;
-                int shift = static_cast<int>(idx / n) % static_cast<int>(bits);
+                const int dim = static_cast<int>(length - idx - 1) % n;
+                const int shift = static_cast<int>(idx / n) % static_cast<int>(bits);
                 x[dim] |= 1u << shift;
             }
         }

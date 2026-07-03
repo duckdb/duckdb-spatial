@@ -1,11 +1,18 @@
 #include <mlt/feature.hpp>
 
-#include <mlt/geometry.hpp>
+#include <mlt/geometry.hpp> // NOLINT(misc-include-cleaner)
 #include <mlt/layer.hpp>
+#include <mlt/properties.hpp>
+
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <string>
+#include <utility>
 
 namespace mlt {
 
-Feature::Feature(id_t ident_, std::unique_ptr<Geometry>&& geometry_, std::uint32_t index_)
+Feature::Feature(std::optional<id_t> ident_, std::unique_ptr<Geometry>&& geometry_, std::uint32_t index_)
     : ident(ident_),
       index(index_),
       geometry(std::move(geometry_)) {}

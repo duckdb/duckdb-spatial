@@ -1,8 +1,8 @@
 #pragma once
 
 #include <mlt/metadata/tileset.hpp>
-#include <mlt/util/packed_bitset.hpp>
 #include <mlt/util/noncopyable.hpp>
+#include <mlt/util/packed_bitset.hpp>
 
 #include <cstdint>
 #include <memory>
@@ -90,7 +90,7 @@ public:
     using ScalarType = metadata::tileset::ScalarType;
 
     PresentProperties() = delete;
-    PresentProperties(ScalarType type_, PropertyVec properties_, const PackedBitset& present) noexcept;
+    PresentProperties(ScalarType type_, PropertyVec properties_, const PackedBitset& present);
 
     ScalarType getType() const noexcept { return type; }
     bool isBoolean() const noexcept { return type == ScalarType::BOOLEAN; }

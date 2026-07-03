@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <type_traits>
 #include <vector>
@@ -32,9 +33,9 @@ std::size_t encodeVarint(T value, std::uint8_t* out) noexcept {
 template <typename T>
     requires(std::is_integral_v<T> && std::is_unsigned_v<T>)
 void encodeVarint(T value, std::vector<std::uint8_t>& out) {
-    std::uint8_t buf[10];
-    const auto n = encodeVarint(value, buf);
-    out.insert(out.end(), buf, buf + n);
+    std::array<std::uint8_t, 10> buf;
+    const auto n = encodeVarint(value, buf.data());
+    out.insert(out.end(), buf.data(), &buf[n]);
 }
 
 template <typename T>

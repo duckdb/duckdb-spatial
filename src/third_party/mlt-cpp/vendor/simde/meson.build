@@ -2,7 +2,7 @@ project('SIMDe', 'c', 'cpp',
         default_options: ['c_std=c99'],
         license: 'MIT',
         meson_version : '>=0.54.0',
-        version: '0.8.2')
+        version: '0.8.4')
 # also update SIMDE_VESION_* in simde/simde-common.h
 
 cc = meson.get_compiler('c')
@@ -351,11 +351,13 @@ simde_avx512_families = [
   'dpwssd',
   'dpwssds',
   'expand',
+  'expandloadu',
   'extract',
   'fixupimm',
   'fixupimm_round',
   'flushsubnormal',
   'fmadd',
+  'fmaddsub',
   'fmsub',
   'fnmadd',
   'fnmsub',
