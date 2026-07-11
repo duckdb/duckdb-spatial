@@ -164,9 +164,9 @@ public:
 		    -1);
 	}
 
-	size_t Read(void *buffer, size_t size, size_t count) override {
+	size_t Read(void *buffer, size_t nBytes) override {
 		auto bytes_data = static_cast<char *>(buffer);
-		auto bytes_left = size * count;
+		auto bytes_left = nBytes;
 
 		try {
 			while (bytes_left > 0) {
@@ -179,35 +179,48 @@ public:
 				bytes_data += bytes_read;
 			}
 		} catch (std::exception &ex) {
-			// Never let the exception cross into GDAL (it is not exception-safe). A clean EOF is reported as EOF;
-			// otherwise record a VSI error and return the partial count. Note: GDAL 3.8.5 can't distinguish a short
-			// read from an error (fixed in 3.9.2), so a real error here may be observed as EOF by the caller.
+			// Never let the exception cross into GDAL (it is not exception-safe). A clean EOF is reported via
+			// Eof(); a real error is recorded via Error() (see ClearErr()/Error() below) and a VSI error message,
+			// while still returning the partial byte count.
 			if (file_handle->SeekPosition() == file_handle->GetFileSize()) {
 				is_eof = true;
 			} else {
+				has_error = true;
 				VSIError(VSIE_FileError, "%s", CleanGDALMessage(ex.what()).c_str());
 			}
 		} catch (...) {
+			has_error = true;
 			VSIError(VSIE_FileError, "Unknown error reading file");
 		}
 
-		return count - (bytes_left / size);
+		return nBytes - bytes_left;
+	}
+
+	void ClearErr() override {
+		is_eof = false;
+		has_error = false;
 	}
 
 	int Eof() override {
 		return is_eof ? TRUE : FALSE;
 	}
 
-	size_t Write(const void *buffer, size_t size, size_t count) override {
+	int Error() override {
+		return has_error ? TRUE : FALSE;
+	}
+
+	size_t Write(const void *buffer, size_t nBytes) override {
 		size_t written_bytes = 0;
 		try {
-			written_bytes = file_handle->Write(const_cast<void *>(buffer), size * count);
+			written_bytes = file_handle->Write(const_cast<void *>(buffer), nBytes);
 		} catch (std::exception &ex) {
+			has_error = true;
 			VSIError(VSIE_FileError, "%s", CleanGDALMessage(ex.what()).c_str());
 		} catch (...) {
+			has_error = true;
 			VSIError(VSIE_FileError, "Unknown error writing file");
 		}
-		return written_bytes / size;
+		return written_bytes;
 	}
 
 	int Flush() override {
@@ -238,6 +251,7 @@ public:
 private:
 	unique_ptr<FileHandle> file_handle = nullptr;
 	bool is_eof = false;
+	bool has_error = false;
 	bool can_seek = false;
 };
 
@@ -253,8 +267,8 @@ public:
 		return client_prefix + value;
 	}
 
-	VSIVirtualHandle *Open(const char *gdal_file_path, const char *access, bool set_error,
-	                       CSLConstList /*papszoptions */) override {
+	VSIVirtualHandleUniquePtr Open(const char *gdal_file_path, const char *access, bool set_error,
+	                               CSLConstList /*papszoptions */) override {
 
 		// Strip the prefix to get the real file path
 		const auto real_file_path = StripPrefix(gdal_file_path);
@@ -302,7 +316,7 @@ public:
 
 		try {
 			auto file = fs.OpenFile(real_file_path, flags | FileCompressionType::AUTO_DETECT);
-			return new DuckDBFileHandle(std::move(file));
+			return VSIVirtualHandleUniquePtr(new DuckDBFileHandle(std::move(file)));
 
 		} catch (std::exception &ex) {
 
@@ -407,7 +421,7 @@ public:
 		    -1);
 	}
 
-	bool IsLocal(const char *gdal_file_path) override {
+	bool IsLocal(const char *gdal_file_path) const override {
 		const auto real_file_path = StripPrefix(gdal_file_path);
 		return !FileSystem::IsRemoteFile(real_file_path);
 	}
@@ -510,7 +524,8 @@ public:
 		}
 	}
 
-	int Rename(const char *oldpath, const char *newpath) override {
+	int Rename(const char *oldpath, const char *newpath, GDALProgressFunc /*pProgressFunc*/,
+	           void * /*pProgressData*/) override {
 		auto &fs = FileSystem::GetFileSystem(context);
 		const auto real_old_path = StripPrefix(oldpath);
 		const auto real_new_path = StripPrefix(newpath);

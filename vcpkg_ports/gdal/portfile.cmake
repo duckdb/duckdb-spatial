@@ -2,7 +2,7 @@ vcpkg_from_github(
     OUT_SOURCE_PATH SOURCE_PATH
     REPO OSGeo/gdal
     REF "v${VERSION}"
-    SHA512 5b155229225e904b3619628ec27efdd273d9f083c1ee4f6d94041897d5bc9c3133590b70885ad61fc8864da2f334a75cf32bafe7f776c40bbbc3673fe842c986
+    SHA512 1d2bb00604cd7e09e9ab108bb2a5f80dcfa4e292e90e4a9245e662f2a130170d833d6f559585dec96c62738d2976167a1542bf74688eba1e998f1ea91481b51f
     HEAD_REF master
     PATCHES
         find-link-libraries.patch
@@ -10,9 +10,6 @@ vcpkg_from_github(
         libkml.patch
         target-is-valid.patch
         duckdb_gdal_json.patch
-        duckdb_gdal_msys.patch
-        duckdb_gdal_remove_filehandler.patch
-        duckdb_gdal_windows_static.patch
 )
 # `vcpkg clean` stumbles over one subdir
 file(REMOVE_RECURSE "${SOURCE_PATH}/autotest")

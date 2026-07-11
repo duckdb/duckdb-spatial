@@ -1,8 +1,8 @@
 diff --git a/frmts/eeda/eedadataset.cpp b/frmts/eeda/eedadataset.cpp
-index 5f9f204..b995b8f 100644
+index 9922cb2..612ce25 100644
 --- a/frmts/eeda/eedadataset.cpp
 +++ b/frmts/eeda/eedadataset.cpp
-@@ -617,7 +617,7 @@ OGRFeature *GDALEEDALayer::GetNextRawFeature()
+@@ -596,7 +596,7 @@ OGRFeature *GDALEEDALayer::GetNextRawFeature()
                      if (poOtherProperties == nullptr)
                          poOtherProperties = json_object_new_object();
                      json_object_object_add(poOtherProperties, it.key, it.val);
@@ -11,8 +11,57 @@ index 5f9f204..b995b8f 100644
                  }
              }
          }
+diff --git a/ogr/ogrgeojsonwriter.cpp b/ogr/ogrgeojsonwriter.cpp
+index b4543ed..0c230c1 100644
+--- a/ogr/ogrgeojsonwriter.cpp
++++ b/ogr/ogrgeojsonwriter.cpp
+@@ -199,7 +199,7 @@ static void OGRGeoJSONPatchPosition(json_object *poJSonCoordinates,
+     {
+         json_object_array_add(
+             poJSonCoordinates,
+-            json_object_get(json_object_array_get_idx(poNativeCoordinates, i)));
++            gdal__json_object_get(json_object_array_get_idx(poNativeCoordinates, i)));
+     }
+ }
+ 
+@@ -484,7 +484,7 @@ static void OGRGeoJSONPatchGeometry(json_object *poJSonGeometry,
+             continue;
+         }
+ 
+-        json_object_object_add(poJSonGeometry, it.key, json_object_get(it.val));
++        json_object_object_add(poJSonGeometry, it.key, gdal__json_object_get(it.val));
+     }
+ }
+ 
+@@ -662,7 +662,7 @@ json_object *OGRGeoJSONWriteFeature(OGRFeature *poFeature,
+                 }
+                 if (strcmp(it.key, "geometry") == 0)
+                 {
+-                    poNativeGeom = json_object_get(it.val);
++                    poNativeGeom = gdal__json_object_get(it.val);
+                     continue;
+                 }
+                 if (strcmp(it.key, "id") == 0)
+@@ -741,7 +741,7 @@ json_object *OGRGeoJSONWriteFeature(OGRFeature *poFeature,
+                     continue;
+                 }
+ 
+-                json_object_object_add(poObj, it.key, json_object_get(it.val));
++                json_object_object_add(poObj, it.key, gdal__json_object_get(it.val));
+             }
+             json_object_put(poNativeJSon);
+         }
+@@ -1006,7 +1006,7 @@ json_object *OGRGeoJSONWriteAttributes(OGRFeature *poFeature,
+                         const char *pszProp{json_object_get_string(poProperty)};
+                         if (pszProp && strcmp(pszProp, pszStr) == 0)
+                         {
+-                            poObjProp = json_object_get(poProperty);
++                            poObjProp = gdal__json_object_get(poProperty);
+                         }
+                     }
+                 }
 diff --git a/ogr/ogrsf_frmts/geojson/libjson/json_object.c b/ogr/ogrsf_frmts/geojson/libjson/json_object.c
-index 7a23c37..d42a134 100644
+index d11f30b..0a8aced 100644
 --- a/ogr/ogrsf_frmts/geojson/libjson/json_object.c
 +++ b/ogr/ogrsf_frmts/geojson/libjson/json_object.c
 @@ -285,7 +285,7 @@ static int json_escape_str(struct printbuf *pb, const char *str, size_t len, int
@@ -25,7 +74,7 @@ index 7a23c37..d42a134 100644
  	if (!jso)
  		return jso;
 diff --git a/ogr/ogrsf_frmts/geojson/libjson/json_object.h b/ogr/ogrsf_frmts/geojson/libjson/json_object.h
-index 05f25b0..085faca 100644
+index 05f25b0..094eb58 100644
 --- a/ogr/ogrsf_frmts/geojson/libjson/json_object.h
 +++ b/ogr/ogrsf_frmts/geojson/libjson/json_object.h
 @@ -140,7 +140,7 @@ extern "C" {
@@ -54,6 +103,15 @@ index 05f25b0..085faca 100644
   */
  JSON_EXPORT int json_object_put(struct json_object *obj);
  
+@@ -332,7 +332,7 @@ JSON_EXPORT json_object_to_json_string_fn json_object_userdata_to_json_string;
+ /** Create a new empty object with a reference count of 1.  The caller of
+  * this object initially has sole ownership.  Remember, when using
+  * json_object_object_add or json_object_array_put_idx, ownership will
+- * transfer to the object/array.  Call json_object_get if you want to maintain
++ * transfer to the object/array.  Call gdal__json_object_get if you want to maintain
+  * shared ownership or also add this object as a child of multiple objects or
+  * arrays.  Any ownerships you acquired but did not transfer must be released
+  * through json_object_put.
 @@ -365,7 +365,7 @@ JSON_C_CONST_FUNCTION(JSON_EXPORT size_t json_c_object_sizeof(void));
   *
   * If you want to retain a reference to the added object, independent
@@ -63,6 +121,50 @@ index 05f25b0..085faca 100644
   *
   * Since ownership transfers to `obj`, you must make sure
   * that you do in fact have ownership over `val`.  For instance,
+@@ -409,13 +409,13 @@ JSON_EXPORT int json_object_object_add_ex(struct json_object *obj, const char *c
+  *  need to distinguish between these cases, use json_object_object_get_ex().
+  *
+  * *No* reference counts will be changed.  There is no need to manually adjust
+- * reference counts through the json_object_put/json_object_get methods unless
++ * reference counts through the json_object_put/gdal__json_object_get methods unless
+  * you need to have the child (value) reference maintain a different lifetime
+  * than the owning parent (obj). Ownership of the returned value is retained
+- * by obj (do not do json_object_put unless you have done a json_object_get).
++ * by obj (do not do json_object_put unless you have done a gdal__json_object_get).
+  * If you delete the value from obj (json_object_object_del) and wish to access
+  * the returned reference afterwards, make sure you have first gotten shared
+- * ownership through json_object_get (& don't forget to do a json_object_put
++ * ownership through gdal__json_object_get (& don't forget to do a json_object_put
+  * or transfer ownership to prevent a memory leak).
+  *
+  * @param obj the json_object instance
+@@ -431,7 +431,7 @@ JSON_EXPORT struct json_object *json_object_object_get(const struct json_object
+  * if obj isn't a json_type_object).
+  *
+  * *No* reference counts will be changed.  There is no need to manually adjust
+- * reference counts through the json_object_put/json_object_get methods unless
++ * reference counts through the json_object_put/gdal__json_object_get methods unless
+  * you need to have the child (value) reference maintain a different lifetime
+  * than the owning parent (obj).  Ownership of value is retained by obj.
+  *
+@@ -580,7 +580,7 @@ json_object_array_bsearch(const struct json_object *key, const struct json_objec
+  *
+  * The reference count will *not* be incremented. This is to make adding
+  * fields to objects in code more compact. If you want to retain a reference
+- * to an added object you must wrap the passed object with json_object_get
++ * to an added object you must wrap the passed object with gdal__json_object_get
+  *
+  * @param obj the json_object instance
+  * @param val the json_object to be added
+@@ -591,7 +591,7 @@ JSON_EXPORT int json_object_array_add(struct json_object *obj, struct json_objec
+  *
+  * The reference count will *not* be incremented. This is to make adding
+  * fields to objects in code more compact. If you want to retain a reference
+- * to an added object you must wrap the passed object with json_object_get
++ * to an added object you must wrap the passed object with gdal__json_object_get
+  *
+  * The reference count of a replaced object will be decremented.
+  *
 diff --git a/ogr/ogrsf_frmts/geojson/libjson/json_object_iterator.h b/ogr/ogrsf_frmts/geojson/libjson/json_object_iterator.h
 index a9b1433..1f79063 100644
 --- a/ogr/ogrsf_frmts/geojson/libjson/json_object_iterator.h
@@ -77,7 +179,7 @@ index a9b1433..1f79063 100644
   *         the JSON Null value as a NULL json_object instance
   *         pointer.
 diff --git a/ogr/ogrsf_frmts/geojson/libjson/json_tokener.c b/ogr/ogrsf_frmts/geojson/libjson/json_tokener.c
-index 1d24104..44fa630 100644
+index 32e278e..8d8a276 100644
 --- a/ogr/ogrsf_frmts/geojson/libjson/json_tokener.c
 +++ b/ogr/ogrsf_frmts/geojson/libjson/json_tokener.c
 @@ -408,7 +408,7 @@ struct json_object *json_tokener_parse_ex(struct json_tokener *tok, const char *
@@ -89,7 +191,7 @@ index 1d24104..44fa630 100644
  			json_tokener_reset_level(tok, tok->depth);
  			tok->depth--;
  			goto redo_char;
-@@ -1209,7 +1209,7 @@ out:
+@@ -1208,7 +1208,7 @@ out:
  
  	if (tok->err == json_tokener_success)
  	{
@@ -98,60 +200,24 @@ index 1d24104..44fa630 100644
  		int ii;
  
  		/* Partially reset, so we parse additional objects on subsequent calls. */
-diff --git a/ogr/ogrsf_frmts/geojson/ogrgeojsonwriter.cpp b/ogr/ogrsf_frmts/geojson/ogrgeojsonwriter.cpp
-index 274236e..19f9fdb 100644
---- a/ogr/ogrsf_frmts/geojson/ogrgeojsonwriter.cpp
-+++ b/ogr/ogrsf_frmts/geojson/ogrgeojsonwriter.cpp
-@@ -153,7 +153,7 @@ static void OGRGeoJSONPatchPosition(json_object *poJSonCoordinates,
-     {
-         json_object_array_add(
-             poJSonCoordinates,
--            json_object_get(json_object_array_get_idx(poNativeCoordinates, i)));
-+            gdal__json_object_get(json_object_array_get_idx(poNativeCoordinates, i)));
-     }
- }
- 
-@@ -438,7 +438,7 @@ static void OGRGeoJSONPatchGeometry(json_object *poJSonGeometry,
-             continue;
-         }
- 
--        json_object_object_add(poJSonGeometry, it.key, json_object_get(it.val));
-+        json_object_object_add(poJSonGeometry, it.key, gdal__json_object_get(it.val));
-     }
- }
- 
-@@ -617,7 +617,7 @@ json_object *OGRGeoJSONWriteFeature(OGRFeature *poFeature,
-                 }
-                 if (strcmp(it.key, "geometry") == 0)
-                 {
--                    poNativeGeom = json_object_get(it.val);
-+                    poNativeGeom = gdal__json_object_get(it.val);
-                     continue;
-                 }
-                 if (strcmp(it.key, "id") == 0)
-@@ -696,7 +696,7 @@ json_object *OGRGeoJSONWriteFeature(OGRFeature *poFeature,
-                     continue;
-                 }
- 
--                json_object_object_add(poObj, it.key, json_object_get(it.val));
-+                json_object_object_add(poObj, it.key, gdal__json_object_get(it.val));
-             }
-             json_object_put(poNativeJSon);
-         }
-@@ -965,7 +965,7 @@ json_object *OGRGeoJSONWriteAttributes(OGRFeature *poFeature,
-                         const char *pszProp{json_object_get_string(poProperty)};
-                         if (pszProp && strcmp(pszProp, pszStr) == 0)
-                         {
--                            poObjProp = json_object_get(poProperty);
-+                            poObjProp = gdal__json_object_get(poProperty);
-                         }
-                     }
-                 }
+diff --git a/ogr/ogrsf_frmts/jsonfg/ogrjsonfgdataset.cpp b/ogr/ogrsf_frmts/jsonfg/ogrjsonfgdataset.cpp
+index 386112c..ad6ba3f 100644
+--- a/ogr/ogrsf_frmts/jsonfg/ogrjsonfgdataset.cpp
++++ b/ogr/ogrsf_frmts/jsonfg/ogrjsonfgdataset.cpp
+@@ -805,7 +805,7 @@ OGRJSONFGDataset::ICreateLayer(const char *pszNameIn,
+                                            json_object_new_string("PROJJSON"));
+                     auto poPROJJSON = reinterpret_cast<json_object *>(
+                         oDoc.GetRoot().GetInternalHandle());
+-                    json_object_get(poPROJJSON);
++                    gdal__json_object_get(poPROJJSON);
+                     json_object_object_add(poObj, "value", poPROJJSON);
+                     if (dfCoordEpoch > 0)
+                     {
 diff --git a/ogr/ogrsf_frmts/plscenes/ogrplscenesdatav1layer.cpp b/ogr/ogrsf_frmts/plscenes/ogrplscenesdatav1layer.cpp
-index e2a5e2b..2dcc1dd 100644
+index 84d75bf..40a4052 100644
 --- a/ogr/ogrsf_frmts/plscenes/ogrplscenesdatav1layer.cpp
 +++ b/ogr/ogrsf_frmts/plscenes/ogrplscenesdatav1layer.cpp
-@@ -399,7 +399,7 @@ bool OGRPLScenesDataV1Layer::GetNextPage()
+@@ -407,7 +407,7 @@ bool OGRPLScenesDataV1Layer::GetNextPage()
              }
              if (m_poAttributeFilter != nullptr)
              {
@@ -160,7 +226,7 @@ index e2a5e2b..2dcc1dd 100644
                  json_object_array_add(poConfig, m_poAttributeFilter);
              }
  
-@@ -1278,7 +1278,7 @@ GIntBig OGRPLScenesDataV1Layer::GetFeatureCount(int bForce)
+@@ -1291,7 +1291,7 @@ GIntBig OGRPLScenesDataV1Layer::GetFeatureCount(int bForce)
          }
          if (m_poAttributeFilter != nullptr)
          {
@@ -170,10 +236,10 @@ index e2a5e2b..2dcc1dd 100644
          }
  
 diff --git a/port/cpl_json.cpp b/port/cpl_json.cpp
-index 99b2c7a..5b1778c 100644
+index 1d7778f..95e9455 100644
 --- a/port/cpl_json.cpp
 +++ b/port/cpl_json.cpp
-@@ -82,7 +82,7 @@ CPLJSONDocument::~CPLJSONDocument()
+@@ -66,7 +66,7 @@ CPLJSONDocument::~CPLJSONDocument()
  }
  
  CPLJSONDocument::CPLJSONDocument(const CPLJSONDocument &other)
@@ -182,7 +248,7 @@ index 99b2c7a..5b1778c 100644
  {
  }
  
-@@ -93,7 +93,7 @@ CPLJSONDocument &CPLJSONDocument::operator=(const CPLJSONDocument &other)
+@@ -77,7 +77,7 @@ CPLJSONDocument &CPLJSONDocument::operator=(const CPLJSONDocument &other)
  
      if (m_poRootJsonObject)
          json_object_put(TO_JSONOBJ(m_poRootJsonObject));
@@ -191,7 +257,7 @@ index 99b2c7a..5b1778c 100644
  
      return *this;
  }
-@@ -202,7 +202,7 @@ void CPLJSONDocument::SetRoot(const CPLJSONObject &oRoot)
+@@ -183,7 +183,7 @@ void CPLJSONDocument::SetRoot(const CPLJSONObject &oRoot)
  {
      if (m_poRootJsonObject)
          json_object_put(TO_JSONOBJ(m_poRootJsonObject));
@@ -200,7 +266,7 @@ index 99b2c7a..5b1778c 100644
  }
  
  /**
-@@ -524,7 +524,7 @@ CPLJSONObject::CPLJSONObject(double dfVal)
+@@ -506,7 +506,7 @@ CPLJSONObject::CPLJSONObject(double dfVal)
  
  CPLJSONObject::CPLJSONObject(const std::string &osName,
                               const CPLJSONObject &oParent)
@@ -209,7 +275,7 @@ index 99b2c7a..5b1778c 100644
  {
      json_object_object_add(TO_JSONOBJ(oParent.m_poJsonObject), osName.c_str(),
                             TO_JSONOBJ(m_poJsonObject));
-@@ -532,7 +532,7 @@ CPLJSONObject::CPLJSONObject(const std::string &osName,
+@@ -514,7 +514,7 @@ CPLJSONObject::CPLJSONObject(const std::string &osName,
  
  CPLJSONObject::CPLJSONObject(const std::string &osName,
                               JSONObjectH poJsonObject)
@@ -218,25 +284,25 @@ index 99b2c7a..5b1778c 100644
  {
  }
  
-@@ -561,7 +561,7 @@ CPLJSONObject::~CPLJSONObject()
+@@ -543,7 +543,7 @@ CPLJSONObject::~CPLJSONObject()
  }
  
  CPLJSONObject::CPLJSONObject(const CPLJSONObject &other)
 -    : m_poJsonObject(json_object_get(TO_JSONOBJ(other.m_poJsonObject))),
 +    : m_poJsonObject(gdal__json_object_get(TO_JSONOBJ(other.m_poJsonObject))),
-       m_osKey(other.m_osKey)
+       m_osKey(other.m_osKey), m_osKeyForSet(other.m_osKeyForSet)
  {
  }
-@@ -580,7 +580,7 @@ CPLJSONObject &CPLJSONObject::operator=(const CPLJSONObject &other)
-     m_osKey = other.m_osKey;
-     if (m_poJsonObject)
-         json_object_put(TO_JSONOBJ(m_poJsonObject));
--    m_poJsonObject = json_object_get(TO_JSONOBJ(other.m_poJsonObject));
-+    m_poJsonObject = gdal__json_object_get(TO_JSONOBJ(other.m_poJsonObject));
+@@ -571,7 +571,7 @@ CPLJSONObject &CPLJSONObject::operator=(const CPLJSONObject &other)
+         m_osKey = other.m_osKey;
+         if (m_poJsonObject)
+             json_object_put(TO_JSONOBJ(m_poJsonObject));
+-        m_poJsonObject = json_object_get(TO_JSONOBJ(other.m_poJsonObject));
++        m_poJsonObject = gdal__json_object_get(TO_JSONOBJ(other.m_poJsonObject));
+     }
      return *this;
  }
- 
-@@ -762,7 +762,7 @@ void CPLJSONObject::Add(const std::string &osName, const CPLJSONArray &oValue)
+@@ -796,7 +796,7 @@ void CPLJSONObject::Add(const std::string &osName, const CPLJSONArray &oValue)
      {
          json_object_object_add(
              TO_JSONOBJ(object.GetInternalHandle()), objectName.c_str(),
@@ -245,7 +311,7 @@ index 99b2c7a..5b1778c 100644
      }
  }
  
-@@ -782,7 +782,7 @@ void CPLJSONObject::Add(const std::string &osName, const CPLJSONObject &oValue)
+@@ -815,7 +815,7 @@ void CPLJSONObject::Add(const std::string &osName, const CPLJSONObject &oValue)
      {
          json_object_object_add(
              TO_JSONOBJ(GetInternalHandle()), "",
@@ -254,7 +320,7 @@ index 99b2c7a..5b1778c 100644
          return;
      }
      CPLJSONObject object = GetObjectByPath(osName, objectName);
-@@ -791,7 +791,7 @@ void CPLJSONObject::Add(const std::string &osName, const CPLJSONObject &oValue)
+@@ -824,7 +824,7 @@ void CPLJSONObject::Add(const std::string &osName, const CPLJSONObject &oValue)
      {
          json_object_object_add(
              TO_JSONOBJ(object.GetInternalHandle()), objectName.c_str(),
@@ -263,7 +329,7 @@ index 99b2c7a..5b1778c 100644
      }
  }
  
-@@ -812,7 +812,7 @@ void CPLJSONObject::AddNoSplitName(const std::string &osName,
+@@ -845,7 +845,7 @@ void CPLJSONObject::AddNoSplitName(const std::string &osName,
      {
          json_object_object_add(
              TO_JSONOBJ(GetInternalHandle()), osName.c_str(),
@@ -272,7 +338,7 @@ index 99b2c7a..5b1778c 100644
      }
  }
  
-@@ -1479,7 +1479,7 @@ void CPLJSONArray::Add(const CPLJSONObject &oValue)
+@@ -1458,7 +1458,7 @@ void CPLJSONArray::Add(const CPLJSONObject &oValue)
      if (m_poJsonObject && oValue.m_poJsonObject)
          json_object_array_add(
              TO_JSONOBJ(m_poJsonObject),

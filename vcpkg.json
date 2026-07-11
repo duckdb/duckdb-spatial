@@ -21,7 +21,7 @@
     },
     {
       "name": "gdal",
-      "version>=": "3.8.5",
+      "version>=": "3.13.1",
       "features": [
         {
           "name": "network",
