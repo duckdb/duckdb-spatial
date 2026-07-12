@@ -2020,11 +2020,20 @@ SELECT ST_MakePolygon(ST_LineString([ST_Point(0, 0), ST_Point(1, 0), ST_Point(1,
 
 ```sql
 GEOMETRY ST_MakeValid (geom GEOMETRY)
+GEOMETRY ST_MakeValid (geom GEOMETRY, method VARCHAR)
+GEOMETRY ST_MakeValid (geom GEOMETRY, method VARCHAR, keepCollapsed BOOLEAN)
 ```
 
 #### Description
 
-Returns a valid representation of the geometry
+Returns a valid representation of the geometry.
+
+`method`: accepts `LINEWORK` or `STRUCTURE`. This parameter is case-insensitive. The default value is `LINEWORK`.
+
+- The `LINEWORK` method combines all rings into a set of noded lines and then extracts valid polygons from that linework. This method keeps all input vertices.
+- The `STRUCTURE` method first makes all rings valid then merges shells and subtracts holes from shells to generate valid result. It assumes that holes and shells are correctly categorized.
+
+`keepCollapsed`: whether or not to retain components that have collapsed into a lower dimensionality. Only works with the  `STRUCTURE` method. The default value is `true`.
 
 ----
 
