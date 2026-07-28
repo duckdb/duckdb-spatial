@@ -48,7 +48,7 @@ public:
 	GeosGeometry get_minimum_rotated_rectangle() const;
 	GeosGeometry get_reversed() const;
 	GeosGeometry get_point_on_surface() const;
-	GeosGeometry get_made_valid() const;
+	GeosGeometry get_made_valid(GEOSMakeValidMethods method, bool keepCollapsed) const;
 	GeosGeometry get_voronoi_diagram() const;
 	GeosGeometry get_built_area() const;
 	GeosGeometry get_noded() const;
@@ -327,8 +327,32 @@ inline GeosGeometry GeosGeometry::get_point_on_surface() const {
 	return GeosGeometry(handle, GEOSPointOnSurface_r(handle, geom));
 }
 
-inline GeosGeometry GeosGeometry::get_made_valid() const {
-	return GeosGeometry(handle, GEOSMakeValid_r(handle, geom));
+inline GeosGeometry GeosGeometry::get_made_valid(GEOSMakeValidMethods method, bool keepCollapsed) const {
+	auto *params_raw = GEOSMakeValidParams_create_r(handle);
+	if (!params_raw) {
+		return GeosGeometry(handle, nullptr);
+	}
+
+	struct ParamsDeleter {
+		GEOSContextHandle_t h;
+		void operator()(GEOSMakeValidParams *p) const {
+			if (p) {
+				GEOSMakeValidParams_destroy_r(h, p);
+			}
+		}
+	};
+
+	unique_ptr<GEOSMakeValidParams, ParamsDeleter> params(params_raw, ParamsDeleter {handle});
+
+	if (!GEOSMakeValidParams_setMethod_r(handle, params.get(), method)) {
+		return GeosGeometry(handle, nullptr);
+	}
+
+	if (!GEOSMakeValidParams_setKeepCollapsed_r(handle, params.get(), keepCollapsed)) {
+		return GeosGeometry(handle, nullptr);
+	}
+
+	return GeosGeometry(handle, GEOSMakeValidWithParams_r(handle, geom, params.get()));
 }
 
 inline GeosGeometry GeosGeometry::get_minimum_rotated_rectangle() const {

@@ -1731,9 +1731,53 @@ struct ST_MakeValid {
 
 		UnaryExecutor::Execute<string_t, string_t>(args.data[0], result, args.size(), [&](const string_t &geom_blob) {
 			const auto geom = lstate.Deserialize(geom_blob);
-			const auto valid = geom.get_made_valid();
+			const auto valid = geom.get_made_valid(GEOS_MAKE_VALID_LINEWORK, true);
 			return lstate.Serialize(result, valid);
 		});
+	}
+
+	static GEOSMakeValidMethods TryParseMethod(const string_t &method_str) {
+		auto method_std = StringUtil::Lower(method_str.GetString());
+
+		if (method_std == "linework") {
+			return GEOS_MAKE_VALID_LINEWORK;
+		} else if (method_std == "structure") {
+			return GEOS_MAKE_VALID_STRUCTURE;
+		}
+
+		throw InvalidInputException("Unknown method: '%s', accepted inputs: linework, structure",
+		                           method_str.GetString().c_str());
+	}
+
+	static void ExecuteWithMethod(DataChunk &args, ExpressionState &state, Vector &result) {
+		auto &lstate = LocalState::ResetAndGet(state);
+
+		BinaryExecutor::Execute<string_t, string_t, string_t>(
+		    args.data[0], args.data[1], result, args.size(),
+		    [&](const string_t &blob, string_t &method_str) {
+			    const auto geom = lstate.Deserialize(blob);
+			    const auto method = TryParseMethod(method_str);
+			    const auto valid = geom.get_made_valid(method, true);
+			    return lstate.Serialize(result, valid);
+		    });
+	}
+
+	static void ExecuteWithKeepCollapsed(DataChunk &args, ExpressionState &state, Vector &result) {
+		auto &lstate = LocalState::ResetAndGet(state);
+
+		TernaryExecutor::Execute<string_t, string_t, bool, string_t>(
+		    args.data[0], args.data[1], args.data[2], result, args.size(),
+		    [&](const string_t &blob, string_t &method_str, bool keepCollapsed) {
+			    const auto geom = lstate.Deserialize(blob);
+			    const auto method = TryParseMethod(method_str);
+
+			    if (method == GEOS_MAKE_VALID_LINEWORK) {
+			      throw InvalidInputException("The 'LINEWORK' method doesn't accept keepCollapsed parameter");
+			    }
+
+			    const auto valid = geom.get_made_valid(method, keepCollapsed);
+			    return lstate.Serialize(result, valid);
+		    });
 	}
 
 	static void Register(ExtensionLoader &loader) {
@@ -1745,6 +1789,29 @@ struct ST_MakeValid {
 				variant.SetBind(GeoTypes::PropagateCRS);
 				variant.SetInit(LocalState::Init);
 				variant.SetFunction(Execute);
+				variant.CanThrowErrors();
+			});
+
+			func.AddVariant([](ScalarFunctionVariantBuilder &variant) {
+				variant.AddParameter("geom", LogicalType::GEOMETRY());
+				variant.AddParameter("method", LogicalType::VARCHAR);
+				variant.SetReturnType(LogicalType::GEOMETRY());
+
+				variant.SetBind(GeoTypes::PropagateCRS);
+				variant.SetInit(LocalState::Init);
+				variant.SetFunction(ExecuteWithMethod);
+				variant.CanThrowErrors();
+			});
+
+			func.AddVariant([](ScalarFunctionVariantBuilder &variant) {
+				variant.AddParameter("geom", LogicalType::GEOMETRY());
+				variant.AddParameter("method", LogicalType::VARCHAR);
+				variant.AddParameter("keepCollapsed", LogicalType::BOOLEAN);
+				variant.SetReturnType(LogicalType::GEOMETRY());
+
+				variant.SetBind(GeoTypes::PropagateCRS);
+				variant.SetInit(LocalState::Init);
+				variant.SetFunction(ExecuteWithKeepCollapsed);
 				variant.CanThrowErrors();
 			});
 
