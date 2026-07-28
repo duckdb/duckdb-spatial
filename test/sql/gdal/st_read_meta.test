@@ -1,0 +1,26 @@
+# name: test/sql/gdal/st_read_meta.test
+# group: [gdal]
+
+require spatial
+
+query I
+SELECT driver_short_name FROM st_read_meta('__WORKING_DIRECTORY__/test/data/amsterdam_roads.fgb');
+----
+FlatGeobuf
+
+# Regression: st_read_meta must not crash when GDAL fails to open a file
+statement ok
+COPY (SELECT 'not a spatial file' AS s) TO '__TEST_DIR__/not_spatial.bin' (FORMAT CSV, HEADER FALSE);
+
+query I
+SELECT COUNT(*) FROM st_read_meta('__TEST_DIR__/not_spatial.bin');
+----
+0
+
+query I
+SELECT driver_short_name FROM st_read_meta([
+    '__TEST_DIR__/not_spatial.bin',
+    '__WORKING_DIRECTORY__/test/data/amsterdam_roads.fgb',
+]);
+----
+FlatGeobuf

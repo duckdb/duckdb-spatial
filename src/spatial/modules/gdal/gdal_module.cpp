@@ -2149,6 +2149,10 @@ void Scan(ClientContext &context, TableFunctionInput &input, DataChunk &output) 
 			// Just skip anything we cant open
 			continue;
 		}
+		if (!dataset) {
+			// Open returns null when the error handler doesnt throw
+			continue;
+		}
 
 		output.data[0].SetValue(output_idx, file.path);
 		output.data[1].SetValue(output_idx, dataset->GetDriver()->GetDescription());
