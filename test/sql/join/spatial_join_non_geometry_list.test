@@ -1,0 +1,58 @@
+# name: test/sql/join/spatial_join_non_geometry_list.test
+# description: https://github.com/duckdb/duckdb-spatial/issues/852
+# Verify && spatial join rewrites are restricted to GEOMETRY operands to prevent crashes on plain LIST columns.
+# group: [join]
+
+require spatial
+
+statement ok
+PRAGMA enable_verification
+
+statement ok
+CREATE TABLE a AS SELECT * FROM (VALUES (1, [10, 20, 30]::ubigint[]), (2, [40, 50]::ubigint[])) t(id, cells);
+
+statement ok
+CREATE TABLE b AS SELECT * FROM (VALUES (1, [20, 25]::ubigint[]), (2, [99]::ubigint[])) t(id, cells);
+
+# Verify && on LISTs does not trigger a spatial join or crash
+query II
+SELECT a.id, b.id FROM a JOIN b ON a.cells && b.cells;
+----
+1	1
+
+# Verify connection remains valid
+query I
+SELECT 1;
+----
+1
+
+# Test with VARCHAR lists to ensure fix is type-agnostic
+statement ok
+CREATE TABLE c AS SELECT * FROM (VALUES (1, ['a', 'b']::varchar[]), (2, ['c']::varchar[])) t(id, cells);
+
+statement ok
+CREATE TABLE d AS SELECT * FROM (VALUES (1, ['b', 'z']::varchar[]), (2, ['q']::varchar[])) t(id, cells);
+
+query II
+SELECT c.id, d.id FROM c JOIN d ON c.cells && d.cells;
+----
+1	1
+
+# Verify legitimate GEOMETRY && GEOMETRY still uses the spatial join
+statement ok
+CREATE TABLE lhs AS
+SELECT ST_Point(x, y) AS geom, (y * 50) + x // 10 AS id
+FROM generate_series(0, 100, 10) r1(x), generate_series(0, 100, 10) r2(y);
+
+statement ok
+CREATE TABLE rhs AS SELECT ST_MakeEnvelope(20, 20, 50, 50) AS geom;
+
+query I
+SELECT count(*) FROM lhs, rhs WHERE ST_Intersects(lhs.geom, rhs.geom);
+----
+16
+
+query II
+EXPLAIN SELECT count(*) FROM lhs, rhs WHERE ST_Intersects(lhs.geom, rhs.geom);
+----
+physical_plan	<REGEX>:.*SPATIAL_JOIN.*Join Type: INNER.*
