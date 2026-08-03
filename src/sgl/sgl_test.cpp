@@ -816,6 +816,30 @@ void test_misc_coverage() {
 	assert(geom.get_vertex_array() != nullptr);
 }
 
+void test_wkb_parsing() {
+	sgl::arena_allocator alloc;
+	sgl::wkb_reader reader(alloc);
+
+	const char point_wkb[] = {1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+	char concatenated_wkb[sizeof(point_wkb) * 2];
+	memcpy(concatenated_wkb, point_wkb, sizeof(point_wkb));
+	memcpy(concatenated_wkb + sizeof(point_wkb), point_wkb, sizeof(point_wkb));
+
+	sgl::geometry geom;
+	assert(reader.try_parse(geom, point_wkb, sizeof(point_wkb)));
+	assert(!reader.try_parse(geom, concatenated_wkb, sizeof(concatenated_wkb)));
+	assert(reader.get_error() == sgl::wkb_reader_error::TRAILING_DATA);
+	assert(strcmp(reader.get_error_message(), "Unexpected trailing data after WKB geometry") == 0);
+	assert(reader.try_parse(geom, point_wkb, sizeof(point_wkb)));
+
+	sgl::extent_xy extent;
+	size_t vertex_count;
+	assert(reader.try_parse_stats(extent, vertex_count, point_wkb, sizeof(point_wkb)));
+	assert(!reader.try_parse_stats(extent, vertex_count, concatenated_wkb, sizeof(concatenated_wkb)));
+	assert(reader.get_error() == sgl::wkb_reader_error::TRAILING_DATA);
+	assert(reader.try_parse_stats(extent, vertex_count, point_wkb, sizeof(point_wkb)));
+}
+
 int main() {
 
 	test_allocator();
@@ -832,6 +856,7 @@ int main() {
 	test_prepared_geometry();
 
 	test_misc_coverage();
+	test_wkb_parsing();
 
 	printf("All tests passed!\n");
 	return 0;

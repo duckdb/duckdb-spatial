@@ -4207,8 +4207,11 @@ bool wkb_reader::try_parse(geometry &out, const char *buf_ptr, const char *end_p
 
 			if (stack_depth == 0) {
 				SGL_ASSERT(parent == nullptr);
-				// Done!
-				return true;
+				if (pos == end) {
+					return true;
+				}
+				error = wkb_reader_error::TRAILING_DATA;
+				return false;
 			}
 
 			SGL_ASSERT(parent != nullptr);
@@ -4430,7 +4433,10 @@ bool wkb_reader::try_parse_stats(extent_xy &out_extent, size_t &out_vertex_count
 
 		while (true) {
 			if (stack_depth == 0) {
-				// We reached the bottom, return!
+				if (pos != end) {
+					error = wkb_reader_error::TRAILING_DATA;
+					return false;
+				}
 				out_vertex_count = vertex_count;
 				out_extent = extent;
 				return true;
@@ -4460,6 +4466,9 @@ const char *wkb_reader::get_error_message() const {
 	}
 	case wkb_reader_error::MIXED_ZM: {
 		return "Mixed Z and M values are not allowed";
+	}
+	case wkb_reader_error::TRAILING_DATA: {
+		return "Unexpected trailing data after WKB geometry";
 	}
 	case wkb_reader_error::RECURSION_LIMIT: {
 		const auto msg_fmt = "Recursion limit '%u' reached";
