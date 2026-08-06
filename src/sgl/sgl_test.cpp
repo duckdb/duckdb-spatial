@@ -816,6 +816,36 @@ void test_misc_coverage() {
 	assert(geom.get_vertex_array() != nullptr);
 }
 
+void test_wkb_reader_dimension_state() {
+	sgl::arena_allocator alloc;
+	sgl::wkb_reader reader(alloc);
+	reader.set_allow_mixed_zm(true);
+
+	const unsigned char mixed_wkb[] = {
+	    0x01, 0x07, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01, 0xE9, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00,
+	    0x00, 0x00, 0x00, 0xF0, 0x3F, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00,
+	    0x00, 0x00, 0x08, 0x40, 0x01, 0xD1, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x40,
+	    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x14, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x40,
+	};
+	const char point_wkb[] = {1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+
+	sgl::geometry geom;
+	assert(reader.try_parse(geom, reinterpret_cast<const char *>(mixed_wkb), sizeof(mixed_wkb)));
+	assert(reader.parsed_mixed_zm());
+	assert(reader.parsed_any_z());
+	assert(reader.parsed_any_m());
+
+	assert(reader.try_parse(geom, point_wkb, sizeof(point_wkb)));
+	assert(!reader.parsed_mixed_zm());
+	assert(!reader.parsed_any_z());
+	assert(!reader.parsed_any_m());
+
+	sgl::extent_xy extent;
+	size_t vertex_count;
+	assert(reader.try_parse_stats(extent, vertex_count, point_wkb, sizeof(point_wkb)));
+	assert(!reader.parsed_mixed_zm());
+}
+
 int main() {
 
 	test_allocator();
@@ -832,6 +862,7 @@ int main() {
 	test_prepared_geometry();
 
 	test_misc_coverage();
+	test_wkb_reader_dimension_state();
 
 	printf("All tests passed!\n");
 	return 0;
