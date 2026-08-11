@@ -2084,7 +2084,7 @@ struct ST_Contains {
 						// return Contains::ON_EDGE;
 						contains = false;
 						break;
-					} else if (side == Side::LEFT && (y1 < y && y <= y2)) {
+					} else if (side == Side::LEFT && (y1 <= y && y < y2)) {
 						winding_number++;
 					} else if (side == Side::RIGHT && (y2 <= y && y < y1)) {
 						winding_number--;
