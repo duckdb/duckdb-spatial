@@ -1,0 +1,85 @@
+# name: test/sql/geometry/st_contains.test
+# group: [geometry]
+#
+# https://github.com/duckdb/duckdb-spatial/issues/806
+
+require spatial
+
+# Query from example in issue 806
+
+query IIII
+WITH poly AS (
+  SELECT ST_GeomFromText(
+    'POLYGON ((11.6742158 48.156714, 11.6781624 48.144285, 11.6837275 48.1447925, 11.6742158 48.156714))'
+  ) AS geom
+),
+pts AS (
+  SELECT * FROM (VALUES
+    (-123.1061120::DOUBLE, 48.144285::DOUBLE)
+  ) AS t(lon, lat)
+)
+SELECT
+  ST_XMin(geom) AS xmin,
+  ST_XMax(geom) AS xmax,
+  ST_Contains(geom::POLYGON_2D, ST_MakePoint(lon, lat)::POINT_2D) AS typed_contains,
+  ST_Contains(geom, ST_MakePoint(lon, lat)::GEOMETRY) AS generic_contains
+FROM poly, pts;
+----
+11.6742158	11.6837275	false	false
+
+# Check inside
+
+query I
+SELECT ST_Contains(
+    ST_GeomFromText('POLYGON ((0 0, 4 0, 4 4, 0 4, 0 0))')::POLYGON_2D,
+    ST_MakePoint(2, 2)::POINT_2D
+);
+----
+true
+
+# Check outside
+
+query I
+SELECT ST_Contains(
+    ST_GeomFromText('POLYGON ((0 0, 4 0, 4 4, 0 4, 0 0))')::POLYGON_2D,
+    ST_MakePoint(10, 10)::POINT_2D
+);
+----
+false
+
+# Boundary exclusion edge
+
+query I
+SELECT ST_Contains(
+    ST_GeomFromText('POLYGON ((0 0, 4 0, 4 4, 0 4, 0 0))')::POLYGON_2D,
+    ST_MakePoint(2, 0)::POINT_2D  -- on an edge
+);
+----
+false
+
+# Boundary exclusion vertex
+
+query I
+SELECT ST_Contains(
+    ST_GeomFromText('POLYGON ((0 0, 4 0, 4 4, 0 4, 0 0))')::POLYGON_2D,
+    ST_MakePoint(0, 0)::POINT_2D  -- on a vertex
+);
+----
+false
+
+# NULL handling
+
+query I
+SELECT ST_Contains(NULL::POLYGON_2D, ST_MakePoint(0, 0)::POINT_2D);
+----
+NULL
+
+# NULL handling
+
+query I
+SELECT ST_Contains(
+    ST_GeomFromText('POLYGON ((0 0, 4 0, 4 4, 0 4, 0 0))')::POLYGON_2D,
+    NULL::POINT_2D
+);
+----
+NULL
