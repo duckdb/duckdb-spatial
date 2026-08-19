@@ -19,6 +19,8 @@ endif()
 
 project(${TARGET_NAME})
 
+set(SPATIAL_ROOT_DIR ${CMAKE_CURRENT_SOURCE_DIR})
+
 add_definitions(-DDUCKDB_MAJOR_VERSION=${DUCKDB_MAJOR_VERSION})
 add_definitions(-DDUCKDB_MINOR_VERSION=${DUCKDB_MINOR_VERSION})
 add_definitions(-DDUCKDB_PATCH_VERSION=${DUCKDB_PATCH_VERSION})
@@ -40,6 +42,9 @@ include_directories(src/third_party/yyjson/include)
 add_subdirectory(src/third_party/yyjson)
 
 include_directories(src/third_party/protozero/include)
+
+add_subdirectory(src/third_party/mlt-cpp EXCLUDE_FROM_ALL)
+include_directories(src/third_party/mlt-cpp/include)
 
 include_directories(src/third_party/shapelib)
 add_subdirectory(src/third_party/shapelib)
@@ -93,15 +98,27 @@ if((NOT EMSCRIPTEN) AND (NOT IOS))
   endif()
 endif()
 
+# Collect mlt-cpp static archive paths for linking without polluting the export set
+find_library(FASTPFOR_LIBRARY NAMES FastPFOR REQUIRED)
+set(MLT_LIBS
+  $<TARGET_FILE:mlt-cpp>
+  $<TARGET_FILE:mlt-cpp-encoder>
+  ${FASTPFOR_LIBRARY}
+)
+
 # Add dependencies to extension
-target_link_libraries(${EXTENSION_NAME} ${EXTENSION_DEPENDENCIES})
+target_link_libraries(${EXTENSION_NAME} ${EXTENSION_DEPENDENCIES} ${MLT_LIBS})
 
 # Build extensions
 set(PARAMETERS "-warnings")
 build_loadable_extension(${TARGET_NAME} ${PARAMETERS} ${EXTENSION_SOURCES})
 
 target_link_libraries(${TARGET_NAME}_loadable_extension
-                      ${EXTENSION_DEPENDENCIES})
+                      ${EXTENSION_DEPENDENCIES} ${MLT_LIBS})
+
+# Ensure mlt libs are built before the extension
+add_dependencies(${EXTENSION_NAME} mlt-cpp mlt-cpp-encoder)
+add_dependencies(${TARGET_NAME}_loadable_extension mlt-cpp mlt-cpp-encoder)
 
 install(
   TARGETS ${EXTENSION_NAME}
