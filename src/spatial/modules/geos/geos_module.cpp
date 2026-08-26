@@ -2475,6 +2475,156 @@ struct ST_SymDifference {
 	}
 };
 
+struct ST_Subdivide {
+	static void SubdivideRecursive(GEOSContextHandle_t handle_p, GeosCollection &collection, const GeosGeometry &geom,
+	                               const size_t max_vertices, const size_t dimension, const size_t depth) {
+		constexpr size_t max_depth = 50;
+
+		// If we get a lower-dimensional object from an intersection, we abort
+		if (geom.get_dimension() < dimension) {
+			return;
+		}
+
+		// A MultiPoint is ignored here on purpose as MultiPoints get treated as one
+		// object compared to multiple distinct objects
+		if (geom.type() == GEOS_MULTILINESTRING || geom.type() == GEOS_MULTIPOLYGON || geom.type() == GEOS_GEOMETRYCOLLECTION) {
+			for (size_t i = 0; i < geom.get_num_geometries(); i++) {
+				const auto subgeom = geom.get_geometry_n(i);
+
+				// Do not increment depth as we are still on the same level, just processing individual
+				// parts of the geometry
+				SubdivideRecursive(handle_p, collection, subgeom, max_vertices, dimension, depth);
+			}
+			return;
+		}
+
+		if (geom.get_num_vertices() <= max_vertices) {
+			collection.add(std::move(geom.get_clone()));
+			return;
+		}
+
+		// Went so far that we will just add the rest all at once.
+		if (depth > max_depth) {
+			collection.add(std::move(geom.get_clone()));
+			return;
+		}
+
+		double xmin, ymin, xmax, ymax;
+		geom.get_extent(xmin, ymin, xmax, ymax);
+
+		const double width = xmax - xmin;
+		const double height = ymax - ymin;
+
+		if (width == 0.0 && height == 0.0) {
+			if (geom.type() == GEOS_POINT) {
+				collection.add(std::move(geom.get_clone()));
+			}
+
+			throw InvalidInputException("cannot subdivide non-point geometries with zero width and height");
+		}
+
+		// no need to recompute proper width and height values after this step, as they are just used
+		// to decide on whether the next division is horizontal or vertical
+		if (width == 0.0) {
+			xmin -= 1e-12;
+			xmax += 1e-12;
+		}
+
+		if (height == 0.0) {
+			ymin -= 1e-12;
+			ymax += 1e-12;
+		}
+
+		double xmin_a, xmax_a, ymin_a, ymax_a;
+		double xmin_b, xmax_b, ymin_b, ymax_b;
+		if (width > height) {
+			xmin_a = xmin;
+			xmax_a = (xmax + xmin) / 2.0;
+			ymin_a = ymin;
+			ymax_a = ymax;
+
+			xmin_b = (xmax + xmin) / 2.0;
+			xmax_b = xmax;
+			ymin_b = ymin;
+			ymax_b = ymax;
+		} else {
+			xmin_a = xmin;
+			xmax_a = xmax;
+			ymin_a = ymin;
+			ymax_a = (ymax + ymin) / 2.0;
+
+			xmin_b = xmin;
+			xmax_b = xmax;
+			ymin_b = (ymax + ymin) / 2.0;
+			ymax_b = ymax;
+		}
+
+		{
+			const GeosGeometry clipping_rect_a = GeosGeometry(handle_p, xmin_a, ymin_a, xmax_a, ymax_a);
+			const GeosGeometry clipped_a = geom.get_intersection(clipping_rect_a);
+			if (!clipped_a.is_empty()) {
+				SubdivideRecursive(handle_p, collection, clipped_a, max_vertices, dimension, depth + 1);
+			}
+		}
+		{
+			const GeosGeometry clipping_rect_b = GeosGeometry(handle_p, xmin_b, ymin_b, xmax_b, ymax_b);
+			const GeosGeometry clipped_b = geom.get_intersection(clipping_rect_b);
+			if (!clipped_b.is_empty()) {
+				SubdivideRecursive(handle_p, collection, clipped_b, max_vertices, dimension, depth + 1);
+			}
+		}
+
+		return;
+	}
+
+	static void Execute(DataChunk &args, ExpressionState &state, Vector &result) {
+		auto &lstate = LocalState::ResetAndGet(state);
+
+		BinaryExecutor::Execute<string_t, uint32_t, string_t>(
+		    args.data[0], args.data[1], result, args.size(),
+		    [&](const string_t &geom_blob, const uint32_t max_vertices) {
+			    if (max_vertices < 5) {
+				    throw InvalidInputException("max_vertices needs to be larger or equal to 5");
+			    }
+
+			    const auto geom = lstate.Deserialize(geom_blob);
+
+			    if (geom.type() == GEOS_GEOMETRYCOLLECTION) {
+				    throw InvalidInputException("Cannot subdivide GeometryCollection");
+			    }
+
+			    if (geom.is_empty()) {
+				    return lstate.Serialize(result, geom);
+			    }
+
+			    GeosCollection collection {lstate.GetContext()};
+			    SubdivideRecursive(lstate.GetContext(), collection, geom, max_vertices, geom.get_dimension(), 0);
+
+			    return lstate.Serialize(result, collection.get_collection());
+		    });
+	}
+
+	static void Register(ExtensionLoader &loader) {
+		FunctionBuilder::RegisterScalar(loader, "ST_Subdivide", [](ScalarFunctionBuilder &func) {
+			func.AddVariant([](ScalarFunctionVariantBuilder &variant) {
+				variant.AddParameter("geom", LogicalType::GEOMETRY());
+				variant.AddParameter("max_vertices", LogicalType::UINTEGER);
+				variant.SetReturnType(LogicalType::GEOMETRY());
+
+				variant.SetInit(LocalState::Init);
+				variant.SetFunction(Execute);
+			});
+
+			func.SetDescription(
+			    "Recursively splits a geometry into sub-geometries until the number of vertices of each are below the "
+			    "threshold given by max_vertices. Accepts any type of input except for a GeometryCollection."
+			    "Degenerate inputs can lead to results having more than max_vertices vertices due to a recursion depth limit.");
+			func.SetTag("ext", "spatial");
+			func.SetTag("category", "relation");
+		});
+	}
+};
+
 struct ST_Touches : SymmetricPreparedBinaryFunction<ST_Touches> {
 	static bool ExecutePredicateNormal(const GeosGeometry &lhs, const GeosGeometry &rhs) {
 		return lhs.touches(rhs);
@@ -3444,6 +3594,7 @@ void RegisterGEOSModule(ExtensionLoader &loader) {
 	ST_SimplifyPreserveTopology::Register(loader);
 	ST_Snap::Register(loader);
 	ST_SymDifference::Register(loader);
+	ST_Subdivide::Register(loader);
 	ST_Touches::Register(loader);
 	ST_Union::Register(loader);
 	ST_VoronoiDiagram::Register(loader);
