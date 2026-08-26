@@ -1,0 +1,41 @@
+require spatial
+
+query I
+SELECT st_astext(st_subdivide(st_geomfromtext('POINT EMPTY'), 5));
+----
+POINT EMPTY
+
+query I
+SELECT st_astext(st_subdivide(st_geomfromtext('POINT (1 1)'), 5));
+----
+GEOMETRYCOLLECTION (POINT (1 1))
+
+query I
+select st_subdivide(st_geomfromtext('MULTIPOINT ((1 1), (2 2), (3 3), (4 4), (5 5), (6 6))'), 5);
+----
+GEOMETRYCOLLECTION (MULTIPOINT (1 1, 2 2, 3 3), MULTIPOINT (4 4, 5 5, 6 6))
+
+query I
+SELECT st_astext(st_subdivide(st_geomfromtext('LINESTRING (1 1, 2 2, 3 3, 4 4, 5 5, 6 6, 7 7, 8 8)'), 5));
+----
+GEOMETRYCOLLECTION (LINESTRING (1 1, 2 2, 3 3, 4 4, 4.5 4.5), LINESTRING (4.5 4.5, 5 5, 6 6, 7 7, 8 8))
+
+query I
+select st_astext(st_subdivide(st_geomfromtext('MULTILINESTRING ((1 1, 2 2, 3 3, 4 4, 5 5, 6 6), (7 7, 8 8, 9 9, 10 10, 11 11, 12 12, 13 13))'), 5));
+----
+GEOMETRYCOLLECTION (LINESTRING (1 1, 2 2, 3 3, 3.5 3.5), LINESTRING (3.5 3.5, 4 4, 5 5, 6 6), LINESTRING (7 7, 8 8, 9 9, 10 10), LINESTRING (10 10, 11 11, 12 12, 13 13))
+
+query I
+SELECT st_astext(st_subdivide(st_geomfromtext('POLYGON((0 0, 0 10, 5 8, 10 10, 10 0, 5 2, 0 0))'), 7));
+----
+GEOMETRYCOLLECTION (POLYGON ((0 0, 0 10, 5 8, 10 10, 10 0, 5 2, 0 0)))
+
+query I
+SELECT st_astext(st_subdivide(st_geomfromtext('POLYGON((0 0, 0 10, 5 8, 10 10, 10 0, 5 2, 0 0))'), 5));
+----
+GEOMETRYCOLLECTION (POLYGON ((5 5, 5 2, 0 0, 0 5, 5 5)), POLYGON ((10 5, 10 0, 5 2, 5 5, 10 5)), POLYGON ((5 8, 5 5, 0 5, 0 10, 5 8)), POLYGON ((10 10, 10 5, 5 5, 5 8, 10 10)))
+
+query I
+select st_astext(st_subdivide(st_geomfromtext('MULTIPOLYGON(((0 0, 0 10, 5 8, 10 10, 10 0, 5 2, 0 0)), ((20 20, 20 30, 25 28, 30 30, 30 20, 25 22, 20 20)))'), 5));
+----
+GEOMETRYCOLLECTION (POLYGON ((5 5, 5 2, 0 0, 0 5, 5 5)), POLYGON ((10 5, 10 0, 5 2, 5 5, 10 5)), POLYGON ((5 8, 5 5, 0 5, 0 10, 5 8)), POLYGON ((10 10, 10 5, 5 5, 5 8, 10 10)), POLYGON ((25 25, 25 22, 20 20, 20 25, 25 25)), POLYGON ((30 25, 30 20, 25 22, 25 25, 30 25)), POLYGON ((25 28, 25 25, 20 25, 20 30, 25 28)), POLYGON ((30 30, 30 25, 25 25, 25 28, 30 30)))
