@@ -225,7 +225,6 @@ void RTreeIndex::CommitDrop(IndexLock &index_lock) {
 template <class CALLBACK = std::function<void(const RTreeEntry &)>>
 static void ConvertToEntries(Vector &box_vec, Vector &rowid_vec, idx_t count, CALLBACK &&callback) {
 	const auto &box_validity = FlatVector::Validity(box_vec);
-	const auto &row_validity = FlatVector::Validity(rowid_vec);
 
 	const auto &box_entries = StructVector::GetEntries(box_vec);
 	const auto box_xmin_data = FlatVector::GetData<float>(*box_entries[0]);
@@ -233,10 +232,13 @@ static void ConvertToEntries(Vector &box_vec, Vector &rowid_vec, idx_t count, CA
 	const auto box_xmax_data = FlatVector::GetData<float>(*box_entries[2]);
 	const auto box_ymax_data = FlatVector::GetData<float>(*box_entries[3]);
 
-	const auto row_data = FlatVector::GetData<row_t>(rowid_vec);
+	UnifiedVectorFormat rowid_format;
+	rowid_vec.ToUnifiedFormat(count, rowid_format);
+	const auto row_data = UnifiedVectorFormat::GetData<row_t>(rowid_format);
 
 	for (idx_t i = 0; i < count; i++) {
-		if (!box_validity.RowIsValid(i) || !row_validity.RowIsValid(i)) {
+		const auto row_idx = rowid_format.sel->get_index(i);
+		if (!box_validity.RowIsValid(i) || !rowid_format.validity.RowIsValid(row_idx)) {
 			continue;
 		}
 
@@ -246,7 +248,7 @@ static void ConvertToEntries(Vector &box_vec, Vector &rowid_vec, idx_t count, CA
 		box.max.x = box_xmax_data[i];
 		box.max.y = box_ymax_data[i];
 
-		const auto row = row_data[i];
+		const auto row = row_data[row_idx];
 
 		RTreeEntry new_entry = {RTree::MakeRowId(row), box};
 
@@ -256,14 +258,16 @@ static void ConvertToEntries(Vector &box_vec, Vector &rowid_vec, idx_t count, CA
 }
 
 ErrorData RTreeIndex::Insert(IndexLock &lock, DataChunk &input, Vector &row_vec) {
+	const auto count = input.size();
 
 	key_chunk.Reset();
 	key_executor->ExecuteExpression(input, key_chunk.data[0]);
+	key_chunk.SetCardinality(count);
 	key_chunk.Flatten();
 
 	auto &box_vec = key_chunk.data[0];
 
-	ConvertToEntries(box_vec, row_vec, input.size(), [&](const RTreeEntry &entry) { tree->Insert(entry); });
+	ConvertToEntries(box_vec, row_vec, count, [&](const RTreeEntry &entry) { tree->Insert(entry); });
 
 	return ErrorData {};
 }
@@ -284,6 +288,7 @@ void RTreeIndex::Delete(IndexLock &lock, DataChunk &input, Vector &row_vec) {
 
 	key_chunk.Reset();
 	key_executor->ExecuteExpression(expr_chunk, key_chunk.data[0]);
+	key_chunk.SetCardinality(count);
 	key_chunk.Flatten();
 
 	auto &box_vec = key_chunk.data[0];
