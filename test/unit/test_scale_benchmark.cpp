@@ -55,7 +55,7 @@ std::vector<Point2D> GenerateClusters(size_t n_points, size_t n_clusters, double
 	return points;
 }
 
-void RunBenchmark(const std::string &name, size_t n_points, size_t n_clusters, double cluster_std, double eps, int64_t min_pts, const std::string &export_csv = "") {
+void RunBenchmark(const std::string &name, size_t n_points, size_t n_clusters, double cluster_std, double eps, int64_t min_pts) {
 	std::cout << "=================================================================\n";
 	std::cout << " BENCHMARK: " << name << " (" << n_points << " points)\n";
 	std::cout << " Parameters: eps = " << eps << ", min_points = " << min_pts << "\n";
@@ -97,21 +97,6 @@ void RunBenchmark(const std::string &name, size_t n_points, size_t n_clusters, d
 	std::cout << "    * Throughput:         " << static_cast<size_t>(throughput) << " points/sec\n";
 	std::cout << "  MEMORY PROFILE:\n";
 	PrintMemUsage();
-
-	// Optionally export sample to CSV for DuckDB CLI verification
-	if (!export_csv.empty() && n_points <= 1000) {
-		std::ofstream out(export_csv);
-		out << "id,x,y,cluster_id\n";
-		for (size_t i = 0; i < points.size(); ++i) {
-			out << i << "," << points[i].x << "," << points[i].y << ",";
-			if (result.IsNoise(i)) {
-				out << "\n"; // NULL in CSV
-			} else {
-				out << result.GetClusterId(i) << "\n";
-			}
-		}
-		std::cout << "  Exported sample results to " << export_csv << "\n";
-	}
 	std::cout << "\n";
 }
 
@@ -122,10 +107,10 @@ int main() {
 	std::cout << "=================================================================\n\n";
 
 	// Scale 1: 10 points
-	RunBenchmark("Small Scale", 10, 2, 0.2, 0.5, 3, "/tmp/clusters_10.csv");
+	RunBenchmark("Small Scale", 10, 2, 0.2, 0.5, 3);
 
 	// Scale 2: 1,000 points
-	RunBenchmark("Medium Scale", 1000, 10, 2.0, 4.0, 10, "/tmp/clusters_1000.csv");
+	RunBenchmark("Medium Scale", 1000, 10, 2.0, 4.0, 10);
 
 	// Scale 3: 1,000,000 points (1 MILLION POINTS!)
 	RunBenchmark("Massive Scale (1 Million Points)", 1000000, 50, 5.0, 6.0, 15);
