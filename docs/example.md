@@ -170,3 +170,88 @@ TO 'output.geojson'
 WITH (FORMAT GDAL, DRIVER 'GeoJSON',LAYER_CREATION_OPTIONS ('WRITE_BBOX=YES', 'RFC7946=YES'))
 ```
 
+## Spatial Density Clustering with DBSCAN (`ST_ClusterDBSCAN`)
+
+We can discover high-density taxi pickup hotspots and identify isolated outlier trips using the `ST_ClusterDBSCAN` window aggregate function.
+
+Because DBSCAN evaluates Cartesian Euclidean distance, we first project the pickup coordinates into a planar metric coordinate system such as State Plane New York Long Island ftUS (`ESRI:102718`) or UTM Zone 18N (`EPSG:32618`), where distance values represent physical lengths (e.g. feet or meters) rather than angular degrees:
+
+```sql
+-- Cluster taxi pickup points within 200 feet of each other with at least 5 pickups
+CREATE TABLE pickup_clusters AS
+WITH projected_pickups AS (
+    SELECT 
+        rowid,
+        pickup_point,
+        -- Transform pickup coordinates to projected planar feet
+        st_transform(pickup_point, 'EPSG:4326', 'ESRI:102718') AS projected_geom
+    FROM cleaned_rides
+    WHERE pickup_point IS NOT NULL
+)
+SELECT 
+    rowid,
+    pickup_point,
+    -- Execute DBSCAN: eps = 200 feet, minpoints = 5
+    ST_ClusterDBSCAN(
+        {'x': st_x(projected_geom), 'y': st_y(projected_geom)}::POINT_2D, 
+        200.0, 
+        5
+    ) OVER () AS cluster_id
+FROM projected_pickups;
+```
+<details>
+<summary>
+    SELECT * FROM pickup_clusters LIMIT 10;
+</summary>
+
+| rowid |         pickup_point         | cluster_id |
+|-------|------------------------------|------------|
+| 1     | POINT (40.773522 -73.871057) | 0          |
+| 2     | POINT (40.789973 -73.975130) | 1          |
+| 3     | POINT (40.712160 -73.999431) | NULL       |
+| 4     | POINT (40.749633 -73.977217) | NULL       |
+| 5     | POINT (40.784332 -73.942313) | NULL       |
+| 6     | POINT (40.756687 -73.974630) | NULL       |
+| 7     | POINT (40.718475 -73.987358) | 180        |
+| 8     | POINT (40.741418 -73.992807) | 2          |
+| 9     | POINT (40.743060 -73.980038) | 3          |
+| 10    | POINT (40.801173 -73.954122) | NULL       |
+
+</details>
+
+We can then aggregate the discovered clusters to identify the most active pickup hubs, filter out noise (`NULL`), and compute cluster centroids:
+
+```sql
+SELECT 
+    cluster_id,
+    count(*) AS total_pickups,
+    round(avg(st_x(pickup_point)), 6) AS centroid_lat,
+    round(avg(st_y(pickup_point)), 6) AS centroid_lon
+FROM pickup_clusters
+WHERE cluster_id IS NOT NULL
+GROUP BY cluster_id
+ORDER BY total_pickups DESC
+LIMIT 10;
+```
+<details>
+<summary>
+    Top 10 Taxi Pickup Hotspots
+</summary>
+
+| cluster_id | total_pickups | centroid_lat | centroid_lon | Approximate Location |
+|------------|---------------|--------------|--------------|----------------------|
+| 9          | 71            | 40.766056    | -73.983470   | Columbus Circle / Central Park South |
+| 69         | 66            | 40.777125    | -73.952293   | Upper East Side (2nd Ave & 79th St) |
+| 30         | 65            | 40.773499    | -73.982080   | Lincoln Center / Broadway |
+| 40         | 62            | 40.755625    | -73.967997   | Midtown East / United Nations |
+| 33         | 56            | 40.740448    | -74.005673   | Chelsea / Meatpacking District |
+| 34         | 56            | 40.759886    | -73.980512   | Rockefeller Center / Midtown |
+| 24         | 55            | 40.749983    | -73.991688   | Herald Square / Penn Station |
+| 51         | 54            | 40.755785    | -73.983498   | Times Square / Theater District |
+| 23         | 50            | 40.763401    | -73.973502   | 5th Avenue & 59th St (The Plaza) |
+| 104        | 50            | 40.734219    | -73.990966   | Union Square |
+
+</details>
+
+
+

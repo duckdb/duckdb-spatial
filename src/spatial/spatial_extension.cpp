@@ -33,6 +33,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterSpatialCastFunctions(loader);
 	RegisterSpatialScalarFunctions(loader);
 	RegisterSpatialAggregateFunctions(loader);
+	RegisterSpatialWindowFunctions(loader);
 	RegisterSpatialTableFunctions(loader);
 	SpatialJoinOptimizer::Register(loader);
 
