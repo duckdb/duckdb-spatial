@@ -9,12 +9,18 @@
 #include "duckdb/function/aggregate_function.hpp"
 #include "duckdb/common/types/column/column_data_collection.hpp"
 
+#include <atomic>
+
 namespace duckdb {
 namespace {
 
 struct DBSCANWindowState {
 	std::vector<int32_t> cluster_ids;
 	std::vector<bool> is_null;
+	mutable std::atomic<idx_t> next_row;
+
+	DBSCANWindowState() : next_row(0) {
+	}
 };
 
 struct ST_ClusterDBSCAN_Point2D {
@@ -43,8 +49,9 @@ struct ST_ClusterDBSCAN_Point2D {
 		const idx_t row_count = partition.count;
 		wstate.cluster_ids.assign(row_count, -1);
 		wstate.is_null.assign(row_count, false);
+		wstate.next_row = 0;
 
-		if (row_count == 0 || !partition.inputs) {
+		if (row_count == 0 || !partition.inputs || partition.column_ids.size() < 3) {
 			return;
 		}
 
@@ -58,18 +65,21 @@ struct ST_ClusterDBSCAN_Point2D {
 		bool params_read = false;
 
 		idx_t current_row = 0;
-		for (auto &chunk : partition.inputs->Chunks()) {
+		for (auto &chunk : partition.inputs->Chunks(partition.column_ids)) {
 			const idx_t chunk_size = chunk.size();
+			if (chunk_size == 0) {
+				continue;
+			}
+
 			auto &pt_vec = chunk.data[0];
 			auto &eps_vec = chunk.data[1];
 			auto &min_pts_vec = chunk.data[2];
 
-			UnifiedVectorFormat pt_format, eps_format, min_pts_format;
-			pt_vec.ToUnifiedFormat(chunk_size, pt_format);
-			eps_vec.ToUnifiedFormat(chunk_size, eps_format);
-			min_pts_vec.ToUnifiedFormat(chunk_size, min_pts_format);
+			if (!params_read) {
+				UnifiedVectorFormat eps_format, min_pts_format;
+				eps_vec.ToUnifiedFormat(chunk_size, eps_format);
+				min_pts_vec.ToUnifiedFormat(chunk_size, min_pts_format);
 
-			if (!params_read && chunk_size > 0) {
 				auto eps_idx = eps_format.sel->get_index(0);
 				auto min_pts_idx = min_pts_format.sel->get_index(0);
 				if (eps_format.validity.RowIsValid(eps_idx)) {
@@ -81,9 +91,16 @@ struct ST_ClusterDBSCAN_Point2D {
 				params_read = true;
 			}
 
+			UnifiedVectorFormat pt_format;
+			pt_vec.ToUnifiedFormat(chunk_size, pt_format);
+
 			auto &entries = StructVector::GetEntries(pt_vec);
-			auto x_data = FlatVector::GetData<double>(*entries[0]);
-			auto y_data = FlatVector::GetData<double>(*entries[1]);
+			UnifiedVectorFormat x_format, y_format;
+			entries[0]->ToUnifiedFormat(chunk_size, x_format);
+			entries[1]->ToUnifiedFormat(chunk_size, y_format);
+
+			auto x_data = UnifiedVectorFormat::GetData<double>(x_format);
+			auto y_data = UnifiedVectorFormat::GetData<double>(y_format);
 
 			for (idx_t i = 0; i < chunk_size; ++i) {
 				const idx_t global_row = current_row + i;
@@ -94,7 +111,15 @@ struct ST_ClusterDBSCAN_Point2D {
 					continue;
 				}
 
-				valid_points.emplace_back(x_data[pt_idx], y_data[pt_idx]);
+				auto x_idx = x_format.sel->get_index(pt_idx);
+				auto y_idx = y_format.sel->get_index(pt_idx);
+
+				if (!x_format.validity.RowIsValid(x_idx) || !y_format.validity.RowIsValid(y_idx)) {
+					wstate.is_null[global_row] = true;
+					continue;
+				}
+
+				valid_points.emplace_back(x_data[x_idx], y_data[y_idx]);
 				row_mapping.push_back(global_row);
 			}
 
@@ -122,10 +147,11 @@ struct ST_ClusterDBSCAN_Point2D {
 	                   const_data_ptr_t g_state, data_ptr_t, const SubFrames &,
 	                   Vector &result, idx_t rid) {
 		auto &wstate = *reinterpret_cast<const DBSCANWindowState *>(g_state);
-		if (rid >= wstate.cluster_ids.size() || wstate.is_null[rid] || wstate.cluster_ids[rid] < 0) {
+		idx_t global_row = wstate.next_row++;
+		if (global_row >= wstate.cluster_ids.size() || wstate.is_null[global_row] || wstate.cluster_ids[global_row] < 0) {
 			FlatVector::SetNull(result, rid, true);
 		} else {
-			FlatVector::GetData<int32_t>(result)[rid] = wstate.cluster_ids[rid];
+			FlatVector::GetData<int32_t>(result)[rid] = wstate.cluster_ids[global_row];
 		}
 	}
 };
