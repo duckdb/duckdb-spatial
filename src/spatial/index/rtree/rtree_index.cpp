@@ -224,6 +224,9 @@ void RTreeIndex::CommitDrop(IndexLock &index_lock) {
 
 template <class CALLBACK = std::function<void(const RTreeEntry &)>>
 static void ConvertToEntries(Vector &box_vec, Vector &rowid_vec, idx_t count, CALLBACK &&callback) {
+	// rowid_vec may be non-flat (e.g. sequence vector during WAL replay buffered index appends)
+	rowid_vec.Flatten(count);
+
 	const auto &box_validity = FlatVector::Validity(box_vec);
 	const auto &row_validity = FlatVector::Validity(rowid_vec);
 
