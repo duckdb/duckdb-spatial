@@ -38,3 +38,27 @@ query I
 SELECT count(*) FROM t1 WHERE ST_Within(geom, ST_MakeEnvelope(450, 450, 650, 650));
 ----
 43
+
+# Insert additional rows into existing index while checkpointing is disabled (lands in WAL)
+statement ok
+INSERT INTO t1 VALUES (ST_Point(500, 500)), (ST_Point(600, 600));
+
+restart
+
+# Replay WAL into existing index and checkpoint (regression test for #861: non-flat row identifiers)
+statement ok
+CHECKPOINT;
+
+query I
+SELECT count(*) FROM t1 WHERE ST_Within(geom, ST_MakeEnvelope(450, 450, 650, 650));
+----
+45
+
+# Additional insert and index scan verification after WAL replay
+statement ok
+INSERT INTO t1 VALUES (ST_Point(550, 550));
+
+query I
+SELECT count(*) FROM t1 WHERE ST_Within(geom, ST_MakeEnvelope(450, 450, 650, 650));
+----
+46
