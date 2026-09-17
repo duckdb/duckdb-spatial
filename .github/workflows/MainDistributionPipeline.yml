@@ -30,7 +30,6 @@ jobs:
       duckdb_version: main
       ci_tools_version: main
       extension_name: spatial
-      vcpkg_commit: 84bab45d415d22042bd0b9081aea57f362da3f35
       exclude_archs: 'linux_amd64_musl'
 
   duckdb-latest-deploy:
@@ -86,4 +85,4 @@ jobs:
           build-type: relassert
           build: python3 duckdb/scripts/ci/retry.py -- make relassert
           test: make unittest_relassert
-          vcpkg-commit: 84bab45d415d22042bd0b9081aea57f362da3f35
+          vcpkg-commit: cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3 # Release 2026.06.24
