@@ -1585,7 +1585,8 @@ public:
 	}
 
 	// Move constructor
-	GlobalState(GlobalState &&other) noexcept : dataset(other.dataset), layer(other.layer), srs(other.srs) {
+	GlobalState(GlobalState &&other) noexcept
+	    : file_path(std::move(other.file_path)), dataset(other.dataset), layer(other.layer), srs(other.srs) {
 		other.dataset = nullptr;
 		other.layer = nullptr;
 		other.srs = nullptr;
@@ -1593,6 +1594,7 @@ public:
 
 	// Move assignment operator
 	GlobalState &operator=(GlobalState &&other) noexcept {
+		std::swap(file_path, other.file_path);
 		std::swap(dataset, other.dataset);
 		std::swap(layer, other.layer);
 		std::swap(srs, other.srs);
@@ -1611,6 +1613,9 @@ public:
 	}
 
 	mutex lock;
+	// The path the dataset was created at, which DuckDB rewrites to a temporary "tmp_*" name when copying
+	// over an existing file.
+	string file_path;
 	GDALDatasetH dataset;
 	OGRLayerH layer;
 	OGRSpatialReferenceH srs;
@@ -1628,6 +1633,8 @@ auto InitGlobal(ClientContext &context, FunctionData &bdata_p, const string &rea
 
 	const auto &file_prefix = DuckDBFileSystemPrefix::GetOrCreate(context);
 	const auto gdal_file_path = file_prefix.AddPrefix(real_file_path);
+
+	result->file_path = real_file_path;
 
 	// Create Dataset
 	result->dataset = GDALCreate(driver, gdal_file_path.c_str(), 0, 0, 0, GDT_Unknown, bdata.driver_options);
@@ -1787,6 +1794,26 @@ void Combine(ExecutionContext &context, FunctionData &bind_data, GlobalFunctionD
 void Finalize(ClientContext &context, FunctionData &bind_data, GlobalFunctionData &gstate_p) {
 	auto &gstate = gstate_p.Cast<GlobalState>();
 
+	// Some drivers spread a single dataset over several files, such as the .shx, .dbf and .prj sidecars of
+	// an ESRI Shapefile. When copying over an existing file, DuckDB rewrites the output path to a "tmp_*"
+	// name and renames only that one file back after this function returns, which would leave the sidecars
+	// of this dataset behind under their temporary name while the previous export keeps its own. Look up
+	// which files belong to this dataset while it is still open so they can be renamed below.
+	vector<string> sidecar_files;
+	const auto tmp_file_name = StringUtil::GetFileName(gstate.file_path);
+	if (StringUtil::StartsWith(tmp_file_name, "tmp_")) {
+		auto file_list = GDALGetFileList(gstate.dataset);
+		if (file_list) {
+			for (auto i = 0; file_list[i]; i++) {
+				const auto file_name = StringUtil::GetFileName(file_list[i]);
+				if (file_name != tmp_file_name && StringUtil::StartsWith(file_name, "tmp_")) {
+					sidecar_files.emplace_back(file_name);
+				}
+			}
+			CSLDestroy(file_list);
+		}
+	}
+
 	// Flush and close the dataset. If a flush fails we leave gstate.dataset set so the GlobalState destructor still
 	// closes it during unwinding.
 	if (GDALFlushCache(gstate.dataset) != CE_None) {
@@ -1798,6 +1825,21 @@ void Finalize(ClientContext &context, FunctionData &bind_data, GlobalFunctionDat
 	gstate.dataset = nullptr;
 	if (close_err != CE_None) {
 		ThrowGDALError("Could not close GDAL dataset");
+	}
+
+	// Rename the remaining files of the dataset so that the output is a complete dataset again. The main
+	// file is left alone, as DuckDB renames that one itself once this function has returned. Drivers may
+	// report components they did not actually create, so skip the ones that are not on disk.
+	if (!sidecar_files.empty()) {
+		auto &fs = FileSystem::GetFileSystem(context);
+		const auto dir = StringUtil::GetFilePath(gstate.file_path);
+		for (const auto &file_name : sidecar_files) {
+			const auto source = fs.JoinPath(dir, file_name);
+			if (!fs.FileExists(source)) {
+				continue;
+			}
+			fs.MoveFile(source, fs.JoinPath(dir, file_name.substr(4)));
+		}
 	}
 }
 

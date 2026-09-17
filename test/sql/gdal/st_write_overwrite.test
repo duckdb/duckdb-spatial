@@ -1,0 +1,29 @@
+# name: test/sql/gdal/st_write_overwrite.test
+# group: [gdal]
+
+require spatial
+
+# Copying over an existing multi-file dataset must replace all of its files, not just the main one.
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        (1, ST_GeomFromText('POINT (0 0)')),
+        (2, ST_GeomFromText('POINT (1 1)'))
+    ) t(id, geom)
+) TO '__TEST_DIR__/overwrite.shp' WITH (FORMAT GDAL, DRIVER 'ESRI Shapefile');
+
+statement ok
+COPY (SELECT 1 AS id, ST_GeomFromText('POINT (2 2)') AS geom)
+TO '__TEST_DIR__/overwrite.shp' WITH (FORMAT GDAL, DRIVER 'ESRI Shapefile');
+
+# The sidecars must not be left behind under their temporary name...
+query I
+SELECT COUNT(*) FROM glob('__TEST_DIR__/tmp_overwrite.*');
+----
+0
+
+# ...and the dataset must not be read together with the sidecars of the previous export.
+query I
+SELECT COUNT(*) FROM ST_Read('__TEST_DIR__/overwrite.shp');
+----
+1
