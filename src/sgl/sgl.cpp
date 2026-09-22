@@ -4159,6 +4159,7 @@ bool wkb_reader::try_parse(geometry &out, const char *buf_ptr, const char *end_p
 
 	le = false;
 	type_id = 0;
+	has_mixed_zm = false;
 	has_any_m = false;
 	has_any_z = false;
 
@@ -4189,10 +4190,11 @@ bool wkb_reader::try_parse(geometry &out, const char *buf_ptr, const char *end_p
 		geom->set_z(has_z);
 		geom->set_m(has_m);
 
+		has_any_z |= has_z;
+		has_any_m |= has_m;
+
 		// Compare with root
 		if (!has_mixed_zm && (out.has_m() != has_m || out.has_z() != has_z)) {
-			has_any_z |= has_z;
-			has_any_m |= has_m;
 			has_mixed_zm = true;
 			if (!allow_mixed_zm) {
 				// Error out!
@@ -4338,6 +4340,7 @@ bool wkb_reader::try_parse_stats(extent_xy &out_extent, size_t &out_vertex_count
 
 	le = false;
 	type_id = 0;
+	has_mixed_zm = false;
 	has_any_m = false;
 	has_any_z = false;
 

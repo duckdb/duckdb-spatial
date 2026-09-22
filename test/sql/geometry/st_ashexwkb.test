@@ -50,6 +50,19 @@ SELECT ST_GeomFromHEXWKB(ST_AsHEXWKB(ST_Point(1, 2)) || ST_AsHEXWKB(ST_Point(9, 
 ----
 Invalid Input Error: Could not parse HEX WKB string: Unexpected trailing data after WKB geometry
 
+# Reader state must not leak between rows. The first WKB is a collection with
+# a Z point and an M point; the second is a standalone Z point.
+query I
+SELECT ST_AsText(ST_GeomFromHEXWKB(wkb))
+FROM (VALUES
+    (1, '01070000000200000001E9030000000000000000F03F0000000000000040000000000000084001D1070000000000000000104000000000000014400000000000001840'),
+    (2, '01E9030000000000000000F03F00000000000000400000000000000840')
+) values(id, wkb)
+ORDER BY id;
+----
+GEOMETRYCOLLECTION ZM (POINT ZM (1 2 3 0), POINT ZM (4 5 0 6))
+POINT Z (1 2 3)
+
 # Test rountrips properly
 statement ok
 CREATE TABLE types (geom GEOMETRY);
