@@ -45,6 +45,11 @@ SELECT ST_GeomFromHEXWKB('010800000000000000');
 ----
 Invalid Input Error: Could not parse HEX WKB string: WKB type 'CIRCULARSTRING' is not supported! (type id: 8, SRID: 0)
 
+statement error
+SELECT ST_GeomFromHEXWKB(ST_AsHEXWKB(ST_Point(1, 2)) || ST_AsHEXWKB(ST_Point(9, 9)));
+----
+Invalid Input Error: Could not parse HEX WKB string: Unexpected trailing data after WKB geometry
+
 # Reader state must not leak between rows. The first WKB is a collection with
 # a Z point and an M point; the second is a standalone Z point.
 query I
