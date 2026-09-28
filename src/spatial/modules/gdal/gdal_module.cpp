@@ -1548,13 +1548,13 @@ auto Bind(ClientContext &context, CopyFunctionBindInput &input, const vector<str
 		throw BinderException("Could not find GDAL driver: " + result->driver_name);
 	}
 
-	// Try to get the file extension from the driver
+	// Try to get the file extension from the driver.
+	// GDAL_DMD_EXTENSIONS may hold a space-separated list, so take the first entry.
+	// Some drivers (e.g. MapML, GeoRSS) declare no extension and return NULL here,
+	// so guard before constructing a std::string from it.
 	const auto file_ext = GDALGetMetadataItem(driver, GDAL_DMD_EXTENSIONS, nullptr);
 	if (file_ext) {
-		input.file_extension = file_ext;
-	} else {
-		const auto file_exts = GDALGetMetadataItem(driver, GDAL_DMD_EXTENSIONS, nullptr);
-		const auto exts = StringUtil::Split(file_exts, ' ');
+		const auto exts = StringUtil::Split(file_ext, ' ');
 		if (!exts.empty()) {
 			input.file_extension = exts[0];
 		}
