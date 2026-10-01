@@ -141,13 +141,10 @@ static unique_ptr<GlobalTableFunctionState> RTreeIndexScanInitGlobal(ClientConte
 	result->max_threads = bind_data.table.GetStorage().MaxThreads(context);
 
 	// Figure out the storage column ids
-	result->column_ids.reserve(input.column_ids.size());
-	for (auto &id : input.column_ids) {
-		storage_t col_id = id;
-		if (id != DConstants::INVALID_INDEX) {
-			col_id = bind_data.table.GetColumn(LogicalIndex(id)).StorageOid();
-		}
-		result->column_ids.emplace_back(col_id);
+	// (this also carries over any struct field extracts pushed down into the scan)
+	result->column_ids.reserve(input.column_indexes.size());
+	for (auto &col_idx : input.column_indexes) {
+		result->column_ids.push_back(bind_data.table.GetStorageIndex(col_idx));
 	}
 
 	// Resolve the query bounds
@@ -207,6 +204,9 @@ static unique_ptr<GlobalTableFunctionState> RTreeIndexScanInitGlobal(ClientConte
 	for (const auto &col_idx : input.column_indexes) {
 		if (col_idx.IsRowIdColumn()) {
 			result->scanned_types.emplace_back(LogicalType::ROW_TYPE);
+		} else if (col_idx.HasType()) {
+			// The column may have a pushed down struct field extract, in which case we scan the extracted type
+			result->scanned_types.push_back(col_idx.GetScanType());
 		} else {
 			result->scanned_types.push_back(columns.GetColumn(col_idx.ToLogical()).Type());
 		}
