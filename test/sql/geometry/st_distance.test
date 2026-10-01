@@ -38,3 +38,56 @@ select st_distance('POLYGON((0 0, 1 1, 1 1, 10 10, 0 0))'::GEOMETRY, 'POLYGON((4
 ----
 true
 
+
+
+# This test comes from a bug report (#879), where ST_Distance would return 0 for disjoint polygons whose segments
+# are collinear but do not overlap (e.g. one polygon is due east of the other, so their bottom edges lie on the same
+# line). The collinear case of the segment intersection test only checked that the collinear vertex was within the
+# extent of the wrong pair of vertices.
+
+statement ok
+CREATE TABLE polys AS SELECT * FROM (VALUES
+	(1, 'POLYGON((40 0, 50 0, 50 10, 40 10, 40 0))'::GEOMETRY),
+	(2, 'POLYGON((0 40, 10 40, 10 50, 0 50, 0 40))'::GEOMETRY),
+	(3, 'POLYGON((11 0, 21 0, 21 10, 11 10, 11 0))'::GEOMETRY),
+	(4, 'POLYGON((40 0, 50 5, 40 10, 40 0))'::GEOMETRY),
+	(5, 'MULTIPOLYGON(((40 0, 50 0, 50 10, 40 10, 40 0)))'::GEOMETRY),
+	(6, 'POLYGON((40 40, 50 40, 50 50, 40 50, 40 40))'::GEOMETRY),
+	(7, 'POLYGON((5 5, 15 5, 15 15, 5 15, 5 5))'::GEOMETRY),
+	(8, 'POLYGON((10 0, 20 0, 20 10, 10 10, 10 0))'::GEOMETRY),
+	(9, 'POLYGON((5 0, 20 0, 20 -10, 5 -10, 5 0))'::GEOMETRY)
+) t(id, geom);
+
+query IIII
+SELECT
+	id,
+	ST_Distance('POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))'::GEOMETRY, geom) AS d,
+	ST_Distance(geom, 'POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))'::GEOMETRY) = d AS symmetric,
+	ST_DWithin('POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))'::GEOMETRY, geom, 5.0) AS within_5
+FROM polys ORDER BY id;
+----
+1	30.0	true	false
+2	30.0	true	false
+3	1.0	true	true
+4	30.0	true	false
+5	30.0	true	false
+6	42.426406	true	false
+7	0.0	true	true
+8	0.0	true	true
+9	0.0	true	true
+
+# Same, but with non-constant arguments on both sides
+query II
+SELECT a.id, ST_Distance(a.geom, b.geom) FROM polys a, polys b WHERE a.id = 1 AND b.id IN (2, 3) ORDER BY b.id;
+----
+1	42.426406
+1	19.0
+
+# A degenerate ring whose every segment has zero length (all vertices identical). The indexed distance search skips
+# zero-length segments, so it found no distance at all and ST_Distance silently returned 0. The indexed search is now
+# only a fast path: when it yields nothing we fall back to the unindexed loops, which handle degenerate segments.
+query II
+SELECT ST_Distance('POLYGON((5 5, 5 5, 5 5, 5 5))'::GEOMETRY, 'POLYGON((100 100, 110 100, 110 110, 100 110, 100 100))'::GEOMETRY),
+       ST_Distance('POLYGON((5 5, 5 5, 5 5, 5 5))'::GEOMETRY, ST_Point(100, 100));
+----
+134.350288	134.350288
