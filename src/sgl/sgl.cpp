@@ -2147,7 +2147,7 @@ bool distance_point_lines(const geometry &lhs, const geometry &rhs, distance_res
 		return true;
 	}
 
-	// Special case: prepared
+	// Special case: prepared. This is only a fast path, fall through to the loop below if it yields no distance
 	if (rhs.is_prepared()) {
 		auto &prep = static_cast<const prepared_geometry &>(rhs);
 		double dist = 0;
@@ -2155,7 +2155,6 @@ bool distance_point_lines(const geometry &lhs, const geometry &rhs, distance_res
 			result.set(dist);
 			return true;
 		}
-		return false;
 	}
 
 	const auto rhs_vertex_width = rhs.get_vertex_width();
@@ -2219,7 +2218,9 @@ bool distance_lines_lines(const geometry &lhs, const geometry &rhs, distance_res
 	}
 
 	if (lhs.is_prepared() && rhs.is_prepared()) {
-		// Both linestrings are prepared, so we can use the prepared distance
+		// Both linestrings are prepared, so we can try the indexed distance first.
+		// This is only a fast path: if it does not produce a distance (e.g. because every segment is zero-length,
+		// which the indexed search skips), fall through to the loops below, which handle those cases.
 		auto &lhs_prep = static_cast<const prepared_geometry &>(lhs);
 		auto &rhs_prep = static_cast<const prepared_geometry &>(rhs);
 		double dist = 0;
@@ -2227,7 +2228,6 @@ bool distance_lines_lines(const geometry &lhs, const geometry &rhs, distance_res
 			result.set(dist);
 			return true;
 		}
-		return false;
 	}
 
 	const auto lhs_vertex_array = lhs.get_vertex_array();
@@ -3279,10 +3279,10 @@ static double point_segment_dist_sq(const vertex_xy &p, const vertex_xy &a, cons
 	return diff.norm_sq();
 }
 
-// Check if point P is on segment QR
+// Check if point P, known to be collinear with segment QR, lies within the extent of QR (and therefore on it)
 static bool point_on_segment(const vertex_xy &p, const vertex_xy &q, const vertex_xy &r) {
-	return q.x >= std::min(p.x, r.x) && q.x <= std::max(p.x, r.x) && q.y >= std::min(p.y, r.y) &&
-	       q.y <= std::max(p.y, r.y);
+	return p.x >= std::min(q.x, r.x) && p.x <= std::max(q.x, r.x) && p.y >= std::min(q.y, r.y) &&
+	       p.y <= std::max(q.y, r.y);
 }
 
 static bool segment_intersects(const vertex_xy &a1, const vertex_xy &a2, const vertex_xy &b1, const vertex_xy &b2) {
@@ -3297,11 +3297,11 @@ static bool segment_intersects(const vertex_xy &a1, const vertex_xy &a2, const v
 	}
 	if (a_is_point) {
 		// A is a point: check if A lies on segment B
-		return point_on_segment(a1, b1, b2);
+		return orient2d_fast(b1, b2, a1) == 0 && point_on_segment(a1, b1, b2);
 	}
 	if (b_is_point) {
 		// B is a point: check if B lies on segment A
-		return point_on_segment(b1, a1, a2);
+		return orient2d_fast(a1, a2, b1) == 0 && point_on_segment(b1, a1, a2);
 	}
 
 	const auto o1 = orient2d_fast(a1, a2, b1);
@@ -3313,17 +3313,17 @@ static bool segment_intersects(const vertex_xy &a1, const vertex_xy &a2, const v
 		return true; // Segments intersect
 	}
 
-	if (o1 == 0 && point_on_segment(a1, b1, b2)) {
-		return true; // a1 is collinear with b1 and b2
+	if (o1 == 0 && point_on_segment(b1, a1, a2)) {
+		return true; // b1 is collinear with a1 and a2, and lies on segment A
 	}
-	if (o2 == 0 && point_on_segment(a2, b1, b2)) {
-		return true; // a2 is collinear with b1 and b2
+	if (o2 == 0 && point_on_segment(b2, a1, a2)) {
+		return true; // b2 is collinear with a1 and a2, and lies on segment A
 	}
-	if (o3 == 0 && point_on_segment(b1, a1, a2)) {
-		return true; // b1 is collinear with a1 and a2
+	if (o3 == 0 && point_on_segment(a1, b1, b2)) {
+		return true; // a1 is collinear with b1 and b2, and lies on segment B
 	}
-	if (o4 == 0 && point_on_segment(b2, a1, a2)) {
-		return true; // b2 is collinear with a1 and a2
+	if (o4 == 0 && point_on_segment(a2, b1, b2)) {
+		return true; // a2 is collinear with b1 and b2, and lies on segment B
 	}
 
 	return false; // Segments do not intersect

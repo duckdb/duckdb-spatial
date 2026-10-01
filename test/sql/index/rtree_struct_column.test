@@ -1,0 +1,85 @@
+# name: test/sql/index/rtree_struct_column.test
+# description: Test fetching struct columns (and pushed down struct field extracts) through an RTREE index scan (#880)
+# group: [index]
+
+require spatial
+
+statement ok
+CREATE TABLE s AS
+SELECT i AS id, {'a': i::DOUBLE, 'b': i::VARCHAR} AS st, ST_MakeEnvelope(i, 0, i + 1, 1) AS g
+FROM range(5000) r(i);
+
+statement ok
+CREATE INDEX s_rt ON s USING RTREE (g);
+
+query II
+EXPLAIN SELECT id, st.a FROM s WHERE ST_Intersects(g, ST_MakeEnvelope(10, 0, 20, 1));
+----
+physical_plan	<REGEX>:.*RTREE_INDEX_SCAN.*
+
+# Struct field extract
+query II rowsort
+SELECT id, st.a FROM s WHERE ST_Intersects(g, ST_MakeEnvelope(10, 0, 20, 1));
+----
+10	10.0
+11	11.0
+12	12.0
+13	13.0
+14	14.0
+15	15.0
+16	16.0
+17	17.0
+18	18.0
+19	19.0
+20	20.0
+9	9.0
+
+query II
+SELECT count(*), sum(st.a) FROM s WHERE ST_Intersects(g, ST_MakeEnvelope(10, 0, 20, 1));
+----
+12	174.0
+
+# Struct field extract only (filter column is projected out)
+query I rowsort
+SELECT st.b FROM s WHERE ST_Intersects(g, ST_MakeEnvelope(10, 0, 12, 1));
+----
+10
+11
+12
+9
+
+# Multiple fields of the same struct
+query II rowsort
+SELECT st.a, st.b FROM s WHERE ST_Intersects(g, ST_MakeEnvelope(10, 0, 12, 1));
+----
+10.0	10
+11.0	11
+12.0	12
+9.0	9
+
+# The whole struct
+query I rowsort
+SELECT st FROM s WHERE ST_Intersects(g, ST_MakeEnvelope(10, 0, 12, 1));
+----
+{'a': 10.0, 'b': 10}
+{'a': 11.0, 'b': 11}
+{'a': 12.0, 'b': 12}
+{'a': 9.0, 'b': 9}
+
+# Rows in transaction-local storage
+statement ok
+BEGIN;
+
+statement ok
+INSERT INTO s VALUES (10000, {'a': 42.0, 'b': 'local'}, ST_MakeEnvelope(10, 0, 11, 1));
+
+query II rowsort
+SELECT id, st.b FROM s WHERE ST_Intersects(g, ST_MakeEnvelope(10, 0, 11, 1));
+----
+10	10
+10000	local
+11	11
+9	9
+
+statement ok
+ROLLBACK;
