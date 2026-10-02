@@ -8,6 +8,7 @@ add_subdirectory(osm)
 add_subdirectory(shapefile)
 add_subdirectory(mvt)
 add_subdirectory(wkb)
+add_subdirectory(mlt)
 
 set(EXTENSION_SOURCES
     ${EXTENSION_SOURCES}

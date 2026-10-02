@@ -1,0 +1,11 @@
+{
+  "name": "fastpfor",
+  "version-semver": "0.4.0",
+  "description": "Fast integer compression library",
+  "homepage": "https://github.com/fast-pack/FastPFOR",
+  "license": "Apache-2.0",
+  "dependencies": [
+    "simde",
+    "vcpkg-cmake"
+  ]
+}
