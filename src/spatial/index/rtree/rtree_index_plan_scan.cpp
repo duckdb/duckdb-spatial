@@ -39,12 +39,12 @@ public:
 		optimize_function = RTreeIndexScanOptimizer::Optimize;
 	}
 
-	static void RewriteIndexExpression(Index &index, LogicalGet &get, Expression &expr, bool &rewrite_possible) {
+	static void RewriteIndexExpression(const vector<column_t> &column_ids, LogicalGet &get, Expression &expr,
+	                                   bool &rewrite_possible) {
 		if (expr.GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
 			auto &bound_colref = expr.Cast<BoundColumnRefExpression>();
 			// bound column ref: rewrite to fit in the current set of bound column ids
 			bound_colref.BindingMutable().table_index = get.table_index;
-			auto &column_ids = index.GetColumnIds();
 			auto &get_column_ids = get.GetColumnIds();
 			column_t referenced_column = column_ids[bound_colref.Binding().column_index];
 			// search for the referenced column in the set of column_ids
@@ -58,15 +58,15 @@ public:
 			rewrite_possible = false;
 		}
 		ExpressionIterator::EnumerateChildren(
-		    expr, [&](Expression &child) { RewriteIndexExpression(index, get, child, rewrite_possible); });
+		    expr, [&](Expression &child) { RewriteIndexExpression(column_ids, get, child, rewrite_possible); });
 	}
 
-	static void RewriteIndexExpressionForFilter(Index &index, LogicalGet &get, unique_ptr<Expression> &expr,
-	                                            const ColumnIndex &filter_idx, bool &rewrite_possible) {
+	static void RewriteIndexExpressionForFilter(const vector<column_t> &indexed_columns, LogicalGet &get,
+	                                            unique_ptr<Expression> &expr, const ColumnIndex &filter_idx,
+	                                            bool &rewrite_possible) {
 		if (expr->GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
 			auto &bound_colref = expr->Cast<BoundColumnRefExpression>();
 
-			auto &indexed_columns = index.GetColumnIds();
 			if (indexed_columns.size() != 1) {
 				// Only single column indexes are supported right now
 				rewrite_possible = false;
@@ -88,7 +88,7 @@ public:
 			return;
 		}
 		ExpressionIterator::EnumerateChildren(*expr, [&](unique_ptr<Expression> &child) {
-			RewriteIndexExpressionForFilter(index, get, child, filter_idx, rewrite_possible);
+			RewriteIndexExpressionForFilter(indexed_columns, get, child, filter_idx, rewrite_possible);
 		});
 	}
 
@@ -122,7 +122,7 @@ public:
 		auto &catalog = Catalog::GetSystemCatalog(context);
 		auto &entry = catalog.GetEntry<ScalarFunctionCatalogEntry>(
 		    context, QualifiedName(catalog.GetName(), Identifier::DefaultSchema(), "ST_Extent_Approx"));
-		const auto &func = entry.functions.GetFunctionByArguments(context, {LogicalType::GEOMETRY()});
+		const auto &func = *entry.functions.GetFunctionByArguments(context, {LogicalType::GEOMETRY()});
 
 		vector<unique_ptr<Expression>> children;
 		children.push_back(expr.Copy());
@@ -198,7 +198,7 @@ public:
 	                           unique_ptr<LogicalOperator> &root, optional_ptr<LogicalFilter> filter,
 	                           optional_ptr<const ColumnIndex> filter_column_idx, unique_ptr<Expression> &filter_expr) {
 		auto &get = get_ptr->Cast<LogicalGet>();
-		if (get.function.name != "seq_scan") {
+		if (get.function.GetName() != "seq_scan") {
 			return false;
 		}
 
@@ -226,20 +226,21 @@ public:
 
 		table_info.BindIndexes(context, RTreeIndex::TYPE_NAME);
 
-		for (auto &index : table_info.GetIndexes().Indexes()) {
-			if (!index.IsBound() || RTreeIndex::TYPE_NAME != index.GetIndexType()) {
+		for (auto index_entry : table_info.GetIndexes().IndexEntries()) {
+			if (index_entry->GetBindState() != IndexBindState::BOUND ||
+			    RTreeIndex::TYPE_NAME != index_entry->GetIndexType()) {
 				continue;
 			}
-
-			auto &index_entry = index.Cast<RTreeIndex>();
+			auto guard = index_entry->GetReadHandle<RTreeIndex>();
 
 			// Create the bind data for this index given the bounding box
 			bool rewrite_possible = true;
-			auto index_expr = index_entry.unbound_expressions[0]->Copy();
+			auto index_expr = guard->CopyUnboundExpression(0);
+			auto indexed_columns = guard->GetColumnIds();
 			if (filter_column_idx) {
-				RewriteIndexExpressionForFilter(index_entry, get, index_expr, *filter_column_idx, rewrite_possible);
+				RewriteIndexExpressionForFilter(indexed_columns, get, index_expr, *filter_column_idx, rewrite_possible);
 			} else {
-				RewriteIndexExpression(index_entry, get, *index_expr, rewrite_possible);
+				RewriteIndexExpression(indexed_columns, get, *index_expr, rewrite_possible);
 			}
 			if (!rewrite_possible) {
 				// Could not rewrite!
@@ -269,7 +270,8 @@ public:
 				continue;
 			}
 
-			bind_data = make_uniq<RTreeIndexScanBindData>(duck_table, index_entry, bbox);
+			bind_data =
+			    make_uniq<RTreeIndexScanBindData>(duck_table, index_entry, guard->GetIndexName(), bbox);
 			break;
 		};
 
@@ -279,7 +281,7 @@ public:
 		}
 
 		// If there are no table filters pushed down into the get, we can just replace the get with the index scan
-		get.function = RTreeIndexScanFunction::GetFunction();
+		get.function = BoundTableFunction(RTreeIndexScanFunction::GetFunction());
 		const auto cardinality = get.function.cardinality(context, bind_data.get());
 		get.has_estimated_cardinality = cardinality->has_estimated_cardinality;
 		get.estimated_cardinality = cardinality->estimated_cardinality;

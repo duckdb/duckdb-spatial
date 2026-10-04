@@ -56,7 +56,7 @@ static PhysicalOperator &CreateNullFilter(PhysicalPlanGenerator &generator, cons
 	    catalog.GetEntry(context, CatalogType::SCALAR_FUNCTION_ENTRY, Identifier::DefaultSchema(), "ST_IsEmpty")
 	        .Cast<ScalarFunctionCatalogEntry>();
 
-	auto is_empty_func = is_empty_entry.functions.GetFunctionByArguments(context, {LogicalType::GEOMETRY()});
+	auto is_empty_func = *is_empty_entry.functions.GetFunctionByArguments(context, {LogicalType::GEOMETRY()});
 	vector<unique_ptr<Expression>> is_empty_args;
 	is_empty_args.push_back(std::move(bound_ref));
 	auto is_empty_expr = is_empty_func.Bind(context, std::move(is_empty_args));
@@ -80,7 +80,7 @@ static PhysicalOperator &CreateBoundingBoxProjection(PhysicalPlanGenerator &plan
 	auto &bbox_func_entry =
 	    catalog.GetEntry(context, CatalogType::SCALAR_FUNCTION_ENTRY, Identifier::DefaultSchema(), "ST_Extent_Approx")
 	        .Cast<ScalarFunctionCatalogEntry>();
-	const auto &bbox_func = bbox_func_entry.functions.GetFunctionByArguments(context, {LogicalType::GEOMETRY()});
+	const auto &bbox_func = *bbox_func_entry.functions.GetFunctionByArguments(context, {LogicalType::GEOMETRY()});
 
 	auto geom_ref_expr = make_uniq_base<Expression, BoundReferenceExpression>(LogicalType::GEOMETRY(), 0);
 	vector<unique_ptr<Expression>> bbox_args;
@@ -106,7 +106,7 @@ static PhysicalOperator &CreateOrderByMinX(PhysicalPlanGenerator &planner, const
 	auto &centroid_func_entry =
 	    catalog.GetEntry(context, CatalogType::SCALAR_FUNCTION_ENTRY, Identifier::DefaultSchema(), "st_centroid")
 	        .Cast<ScalarFunctionCatalogEntry>();
-	const auto &centroid_func = centroid_func_entry.functions.GetFunctionByArguments(context, {GeoTypes::BOX_2DF()});
+	const auto &centroid_func = *centroid_func_entry.functions.GetFunctionByArguments(context, {GeoTypes::BOX_2DF()});
 	vector<unique_ptr<Expression>> centroid_func_args;
 
 	// Reference the geometry column
@@ -119,7 +119,7 @@ static PhysicalOperator &CreateOrderByMinX(PhysicalPlanGenerator &planner, const
 	auto &xmin_func_entry =
 	    catalog.GetEntry(context, CatalogType::SCALAR_FUNCTION_ENTRY, Identifier::DefaultSchema(), "st_xmin")
 	        .Cast<ScalarFunctionCatalogEntry>();
-	const auto &xmin_func = xmin_func_entry.functions.GetFunctionByArguments(context, {GeoTypes::POINT_2D()});
+	const auto &xmin_func = *xmin_func_entry.functions.GetFunctionByArguments(context, {GeoTypes::POINT_2D()});
 	vector<unique_ptr<Expression>> xmin_func_args;
 
 	// Reference the centroid

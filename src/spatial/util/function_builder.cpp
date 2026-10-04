@@ -1,5 +1,6 @@
 #include "spatial/util/function_builder.hpp"
 
+#include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/function_entry.hpp"
 #include "duckdb/catalog/catalog_entry/table_function_catalog_entry.hpp"
 

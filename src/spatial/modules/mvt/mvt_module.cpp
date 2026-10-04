@@ -828,8 +828,6 @@ struct ST_AsMVT {
 	static unique_ptr<FunctionData> Bind(BindAggregateFunctionInput &input) {
 		auto &context = input.GetClientContext();
 		auto &arguments = input.GetArguments();
-		auto &function = input.GetBoundFunction();
-
 
 		auto result = make_uniq<BindData>();
 
@@ -840,10 +838,6 @@ struct ST_AsMVT {
 		}
 
 		// Fold all the other parameters
-		auto folded_layer = false;
-		auto folded_extent = false;
-		auto folded_geom = false;
-		auto folded_feature = false;
 
 		if (arguments.size() >= 2) {
 			auto &layer_expr = arguments[1];
@@ -855,7 +849,6 @@ struct ST_AsMVT {
 						throw InvalidInputException("ST_AsMVT: layer name cannot be empty");
 					}
 				}
-				folded_layer = true;
 			} else {
 				throw InvalidInputException("ST_AsMVT: layer name must be a constant string");
 			}
@@ -872,7 +865,6 @@ struct ST_AsMVT {
 				if (result->extent == 0) {
 					throw InvalidInputException("ST_AsMVT: extent must be greater than zero");
 				}
-				folded_extent = true;
 			} else {
 				throw InvalidInputException("ST_AsMVT: extent must be a constant integer");
 			}
@@ -888,7 +880,6 @@ struct ST_AsMVT {
 						throw InvalidInputException("ST_AsMVT: geometry column name cannot be empty");
 					}
 				}
-				folded_geom = true;
 			} else {
 				throw InvalidInputException("ST_AsMVT: geometry column name must be a constant string");
 			}
@@ -905,7 +896,6 @@ struct ST_AsMVT {
 						throw InvalidInputException("ST_AsMVT: feature id column name cannot be empty");
 					}
 				}
-				folded_feature = true;
 			} else {
 				throw InvalidInputException("ST_AsMVT: feature id column name must be a constant string");
 			}
@@ -986,19 +976,7 @@ struct ST_AsMVT {
 			}
 		}
 
-		// Erase arguments, back to front
-		if (folded_feature) {
-			Function::EraseArgument(function, arguments, 4);
-		}
-		if (folded_geom) {
-			Function::EraseArgument(function, arguments, 3);
-		}
-		if (folded_extent) {
-			Function::EraseArgument(function, arguments, 2);
-		}
-		if (folded_layer) {
-			Function::EraseArgument(function, arguments, 1);
-		}
+		// the folded arguments stay part of the expression tree - Update only reads the leading row argument
 
 		return std::move(result);
 	}

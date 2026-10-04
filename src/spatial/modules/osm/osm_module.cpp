@@ -39,7 +39,7 @@ struct BindData final : TableFunctionData {
 };
 
 unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &input, vector<LogicalType> &return_types,
-                              vector<string> &names) {
+                              vector<Identifier> &names) {
 
 	// Create an enum type for all osm kinds
 	vector<string_t> enum_values = {"node", "way", "relation", "changeset"};
@@ -858,7 +858,7 @@ unique_ptr<TableRef> ReadOsmPBFReplacementScan(ClientContext &context, Replaceme
 
 	auto table_function = make_uniq<TableFunctionRef>();
 	vector<unique_ptr<ParsedExpression>> children;
-	children.push_back(make_uniq<ConstantExpression>(Value(table_name)));
+	children.push_back(ConstantExpression::FromValue(Value(table_name)));
 	table_function->function = make_uniq<FunctionExpression>("ST_ReadOSM", std::move(children));
 	return std::move(table_function);
 }
@@ -904,7 +904,8 @@ constexpr const char *DOC_EXAMPLE = R"(
 //  Register
 //------------------------------------------------------------------------------
 void RegisterOSMModule(ExtensionLoader &loader) {
-	TableFunction read("ST_ReadOSM", {LogicalType::VARCHAR}, Execute, Bind, InitGlobal, InitLocal);
+	TableFunction read("ST_ReadOSM", FunctionSignature().AddPositionalOnly("path", LogicalType::VARCHAR), Execute, Bind,
+	                   InitGlobal, InitLocal);
 
 	read.get_partition_data = GetPartitionData;
 	read.table_scan_progress = Progress;

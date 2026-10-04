@@ -30,7 +30,7 @@ struct ST_GeneratePoints {
 	};
 
 	static unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &input,
-	                                     vector<LogicalType> &return_types, vector<string> &names) {
+	                                     vector<LogicalType> &return_types, vector<Identifier> &names) {
 		auto result = make_uniq<GeneratePointsBindData>();
 
 		return_types.push_back(GeoTypes::POINT_2D());
@@ -126,15 +126,23 @@ struct ST_GeneratePoints {
 		// TODO: Dont overload, make seed named parameter instead
 		TableFunctionSet set("ST_GeneratePoints");
 
-		TableFunction generate_points({GeoTypes::BOX_2D(), LogicalType::BIGINT}, Execute, Bind, Init);
-		generate_points.cardinality = Cardinality;
+		FunctionSignature without_seed;
+		without_seed.AddParameter("box", GeoTypes::BOX_2D()).AddParameter("count", LogicalType::BIGINT);
+
+		FunctionSignature with_seed;
+		with_seed.AddParameter("box", GeoTypes::BOX_2D())
+		    .AddParameter("count", LogicalType::BIGINT)
+		    .AddParameter("seed", LogicalType::BIGINT);
 
 		// Overload without seed
+		TableFunction generate_points("ST_GeneratePoints", std::move(without_seed), Execute, Bind, Init);
+		generate_points.cardinality = Cardinality;
 		set.AddFunction(generate_points);
 
 		// Overload with seed
-		generate_points.GetArguments() = {GeoTypes::BOX_2D(), LogicalType::BIGINT, LogicalType::BIGINT};
-		set.AddFunction(generate_points);
+		TableFunction generate_points_seeded("ST_GeneratePoints", std::move(with_seed), Execute, Bind, Init);
+		generate_points_seeded.cardinality = Cardinality;
+		set.AddFunction(generate_points_seeded);
 		loader.RegisterFunction(set);
 
 		InsertionOrderPreservingMap<string> tags;

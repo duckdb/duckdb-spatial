@@ -7,70 +7,59 @@
 namespace duckdb {
 
 LogicalType GeoTypes::POINT_2D() {
-	auto type = LogicalType::STRUCT({{"x", LogicalType::DOUBLE}, {"y", LogicalType::DOUBLE}});
-	type.SetAlias("POINT_2D");
-	return type;
+	return LogicalType::STRUCT({{"x", LogicalType::DOUBLE}, {"y", LogicalType::DOUBLE}}).WithAlias("POINT_2D");
 }
 
 LogicalType GeoTypes::POINT_3D() {
-	auto type =
-	    LogicalType::STRUCT({{"x", LogicalType::DOUBLE}, {"y", LogicalType::DOUBLE}, {"z", LogicalType::DOUBLE}});
-	type.SetAlias("POINT_3D");
-	return type;
+	return LogicalType::STRUCT({{"x", LogicalType::DOUBLE}, {"y", LogicalType::DOUBLE}, {"z", LogicalType::DOUBLE}})
+	    .WithAlias("POINT_3D");
 }
 
 LogicalType GeoTypes::POINT_4D() {
-	auto type = LogicalType::STRUCT({{"x", LogicalType::DOUBLE},
-	                                 {"y", LogicalType::DOUBLE},
-	                                 {"z", LogicalType::DOUBLE},
-	                                 {"m", LogicalType::DOUBLE}});
-	type.SetAlias("POINT_4D");
-	return type;
+	return LogicalType::STRUCT({{"x", LogicalType::DOUBLE},
+	                            {"y", LogicalType::DOUBLE},
+	                            {"z", LogicalType::DOUBLE},
+	                            {"m", LogicalType::DOUBLE}})
+	    .WithAlias("POINT_4D");
 }
 
 LogicalType GeoTypes::BOX_2D() {
-	auto type = LogicalType::STRUCT({{"min_x", LogicalType::DOUBLE},
-	                                 {"min_y", LogicalType::DOUBLE},
-	                                 {"max_x", LogicalType::DOUBLE},
-	                                 {"max_y", LogicalType::DOUBLE}});
-	type.SetAlias("BOX_2D");
-	return type;
+	return LogicalType::STRUCT({{"min_x", LogicalType::DOUBLE},
+	                            {"min_y", LogicalType::DOUBLE},
+	                            {"max_x", LogicalType::DOUBLE},
+	                            {"max_y", LogicalType::DOUBLE}})
+	    .WithAlias("BOX_2D");
 }
 
 LogicalType GeoTypes::BOX_2DF() {
-	auto type = LogicalType::STRUCT({{"min_x", LogicalType::FLOAT},
-	                                 {"min_y", LogicalType::FLOAT},
-	                                 {"max_x", LogicalType::FLOAT},
-	                                 {"max_y", LogicalType::FLOAT}});
-	type.SetAlias("BOX_2DF");
-	return type;
+	return LogicalType::STRUCT({{"min_x", LogicalType::FLOAT},
+	                            {"min_y", LogicalType::FLOAT},
+	                            {"max_x", LogicalType::FLOAT},
+	                            {"max_y", LogicalType::FLOAT}})
+	    .WithAlias("BOX_2DF");
 }
 
 LogicalType GeoTypes::LINESTRING_2D() {
-	auto type = LogicalType::LIST(LogicalType::STRUCT({{"x", LogicalType::DOUBLE}, {"y", LogicalType::DOUBLE}}));
-	type.SetAlias("LINESTRING_2D");
-	return type;
+	return LogicalType::LIST(LogicalType::STRUCT({{"x", LogicalType::DOUBLE}, {"y", LogicalType::DOUBLE}}))
+	    .WithAlias("LINESTRING_2D");
 }
 
 LogicalType GeoTypes::LINESTRING_3D() {
-	auto type = LogicalType::LIST(
-	    LogicalType::STRUCT({{"x", LogicalType::DOUBLE}, {"y", LogicalType::DOUBLE}, {"z", LogicalType::DOUBLE}}));
-	type.SetAlias("LINESTRING_3D");
-	return type;
+	return LogicalType::LIST(LogicalType::STRUCT(
+	                             {{"x", LogicalType::DOUBLE}, {"y", LogicalType::DOUBLE}, {"z", LogicalType::DOUBLE}}))
+	    .WithAlias("LINESTRING_3D");
 }
 
 LogicalType GeoTypes::POLYGON_2D() {
-	auto type = LogicalType::LIST(
-	    LogicalType::LIST(LogicalType::STRUCT({{"x", LogicalType::DOUBLE}, {"y", LogicalType::DOUBLE}})));
-	type.SetAlias("POLYGON_2D");
-	return type;
+	return LogicalType::LIST(
+	           LogicalType::LIST(LogicalType::STRUCT({{"x", LogicalType::DOUBLE}, {"y", LogicalType::DOUBLE}})))
+	    .WithAlias("POLYGON_2D");
 }
 
 LogicalType GeoTypes::POLYGON_3D() {
-	auto type = LogicalType::LIST(LogicalType::LIST(
-	    LogicalType::STRUCT({{"x", LogicalType::DOUBLE}, {"y", LogicalType::DOUBLE}, {"z", LogicalType::DOUBLE}})));
-	type.SetAlias("POLYGON_3D");
-	return type;
+	return LogicalType::LIST(LogicalType::LIST(LogicalType::STRUCT(
+	                             {{"x", LogicalType::DOUBLE}, {"y", LogicalType::DOUBLE}, {"z", LogicalType::DOUBLE}})))
+	    .WithAlias("POLYGON_3D");
 }
 
 LogicalType GeoTypes::CreateEnumType(const string &name, const vector<string> &members) {
@@ -80,9 +69,7 @@ LogicalType GeoTypes::CreateEnumType(const string &name, const vector<string> &m
 		auto str = string_t(members[i]);
 		varchar_data[i] = str.IsInlined() ? str : StringVector::AddString(varchar_vector, str);
 	}
-	auto enum_type = LogicalType::ENUM(name, varchar_vector, members.size());
-	enum_type.SetAlias(name);
-	return enum_type;
+	return LogicalType::ENUM(name, varchar_vector, members.size()).WithAlias(name);
 }
 
 static unique_ptr<FunctionData> PropagateTypesInternal(ClientContext &context, BoundSimpleFunction &bound_function,

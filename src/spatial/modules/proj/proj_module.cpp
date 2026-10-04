@@ -12,6 +12,7 @@
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/common/types/geometry_crs.hpp"
 #include "duckdb/parser/parsed_data/create_coordinate_system_info.hpp"
+#include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/coordinate_system_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/duck_schema_entry.hpp"
 #include "duckdb/common/exception/binder_exception.hpp"

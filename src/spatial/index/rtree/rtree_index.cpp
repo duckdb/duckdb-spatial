@@ -2,6 +2,7 @@
 #include "duckdb/common/vector/struct_vector.hpp"
 #include "spatial/index/rtree/rtree_index.hpp"
 
+#include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/scalar_function_catalog_entry.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
@@ -114,7 +115,7 @@ RTreeIndex::RTreeIndex(const Identifier &name, IndexConstraintType index_constra
 	auto &catalog = Catalog::GetSystemCatalog(context);
 	auto &entry = catalog.GetEntry<ScalarFunctionCatalogEntry>(
 	    context, QualifiedName(catalog.GetName(), Identifier::DefaultSchema(), "ST_Extent_Approx"));
-	const auto &func = entry.functions.GetFunctionByArguments(context, {source_type});
+	const auto &func = *entry.functions.GetFunctionByArguments(context, {source_type});
 	auto child_expr = make_uniq<BoundReferenceExpression>(source_type, 0);
 
 	vector<unique_ptr<Expression>> children;
@@ -280,7 +281,7 @@ IndexStorageInfo RTreeIndex::SerializeToWAL(const case_insensitive_map_t<Value> 
 	return info;
 }
 
-idx_t RTreeIndex::GetInMemorySize(IndexLock &state) {
+idx_t RTreeIndex::GetInMemorySize(IndexLock &state) const {
 	const auto &leaf_alloc = tree->GetLeafAllocator();
 	const auto &node_alloc = tree->GetNodeAllocator();
 	return leaf_alloc.GetInMemorySize() + node_alloc.GetInMemorySize();

@@ -660,7 +660,7 @@ public:
 	OGRwkbGeometryType layer_type = wkbUnknown;
 };
 
-auto Bind(ClientContext &ctx, TableFunctionBindInput &input, vector<LogicalType> &col_types, vector<string> &col_names)
+auto Bind(ClientContext &ctx, TableFunctionBindInput &input, vector<LogicalType> &col_types, vector<Identifier> &col_names)
     -> unique_ptr<FunctionData> {
 
 	auto result = make_uniq<BindData>();
@@ -825,7 +825,7 @@ auto Bind(ClientContext &ctx, TableFunctionBindInput &input, vector<LogicalType>
 				// Rename the geometry column to "geom" unless keep_wkb is set
 				col_names.push_back("geom");
 			} else {
-				col_names.push_back(child_schema.name);
+				col_names.emplace_back(child_schema.name);
 			}
 
 			if (duck_type.id() != LogicalTypeId::GEOMETRY) {
@@ -1265,7 +1265,7 @@ auto ReplacementScan(ClientContext &, ReplacementScanInput &input, optional_ptr<
 
 		auto table_function = make_uniq<TableFunctionRef>();
 		vector<unique_ptr<ParsedExpression>> children;
-		children.push_back(make_uniq<ConstantExpression>(Value(table_name)));
+		children.push_back(ConstantExpression::FromValue(Value(table_name)));
 		table_function->function = make_uniq<FunctionExpression>("ST_Read", std::move(children));
 		return std::move(table_function);
 	}
@@ -1341,19 +1341,22 @@ static constexpr auto EXAMPLE = R"(
 	)";
 
 void Register(ExtensionLoader &loader) {
-	TableFunction read_func("ST_Read", {LogicalType::VARCHAR}, Scan, Bind, InitGlobal);
+	FunctionSignature signature;
+	signature.AddParameter("file_name", LogicalType::VARCHAR).WithTypedKwargs("options", [&](TypedKwargs &options) {
+		options.Add("open_options", LogicalType::LIST(LogicalType::VARCHAR))
+		    .Add("allowed_drivers", LogicalType::LIST(LogicalType::VARCHAR))
+		    .Add("sibling_files", LogicalType::LIST(LogicalType::VARCHAR))
+		    .Add("layer", LogicalType::VARCHAR)
+		    .Add("max_batch_size", LogicalType::INTEGER)
+		    .Add("keep_wkb", LogicalType::BOOLEAN);
+	});
+
+	TableFunction read_func("ST_Read", std::move(signature), Scan, Bind, InitGlobal);
 	read_func.cardinality = Cardinality;
 	read_func.statistics = Statistics;
 	read_func.table_scan_progress = Progress;
 	read_func.pushdown_complex_filter = Pushdown;
 	read_func.to_string = ToString;
-
-	read_func.named_parameters["open_options"] = LogicalType::LIST(LogicalType::VARCHAR);
-	read_func.named_parameters["allowed_drivers"] = LogicalType::LIST(LogicalType::VARCHAR);
-	read_func.named_parameters["sibling_files"] = LogicalType::LIST(LogicalType::VARCHAR);
-	read_func.named_parameters["layer"] = LogicalType::VARCHAR;
-	read_func.named_parameters["max_batch_size"] = LogicalType::INTEGER;
-	read_func.named_parameters["keep_wkb"] = LogicalType::BOOLEAN;
 	read_func.parallelism = TableFunctionParallelism::SEQUENTIAL;
 
 	loader.RegisterFunction(read_func);
@@ -1432,8 +1435,8 @@ public:
 	}
 };
 
-bool MatchOption(const char *name, const pair<string, vector<Value>> &option, bool list = false) {
-	if (StringUtil::CIEquals(name, option.first)) {
+bool MatchOption(const char *name, const pair<const Identifier, vector<Value>> &option, bool list = false) {
+	if (option.first == name) {
 		if (option.second.empty()) {
 			throw BinderException("GDAL COPY option '%s' requires a value", name);
 		}
@@ -1861,7 +1864,7 @@ public:
 	idx_t driver_count;
 };
 
-auto Bind(ClientContext &context, TableFunctionBindInput &input, vector<LogicalType> &types, vector<string> &names)
+auto Bind(ClientContext &context, TableFunctionBindInput &input, vector<LogicalType> &types, vector<Identifier> &names)
     -> unique_ptr<FunctionData> {
 
 	types.emplace_back(LogicalType::VARCHAR);
@@ -2019,7 +2022,7 @@ LogicalType GetLayerType() {
 	});
 }
 
-auto Bind(ClientContext &context, TableFunctionBindInput &input, vector<LogicalType> &types, vector<string> &names)
+auto Bind(ClientContext &context, TableFunctionBindInput &input, vector<LogicalType> &types, vector<Identifier> &names)
     -> unique_ptr<FunctionData> {
 	names.push_back("file_name");
 	names.push_back("driver_short_name");
@@ -2198,7 +2201,8 @@ static constexpr auto EXAMPLE = R"(
 	)";
 
 static void Register(ExtensionLoader &loader) {
-	const TableFunction func("ST_Read_Meta", {LogicalType::VARCHAR}, Scan, Bind, InitGlobal);
+	const TableFunction func("ST_Read_Meta", FunctionSignature().AddPositionalOnly("path", LogicalType::VARCHAR), Scan,
+	                         Bind, InitGlobal);
 	loader.RegisterFunction(MultiFileReader::CreateFunctionSet(func));
 
 	InsertionOrderPreservingMap<string> tags;

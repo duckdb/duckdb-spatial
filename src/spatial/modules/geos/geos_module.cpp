@@ -233,22 +233,17 @@ struct ST_AsMVTGeom {
 
 	static unique_ptr<FunctionData> Bind(BindScalarFunctionInput &input) {
 		auto &arguments = input.GetArguments();
-		auto &bound_function = input.GetBoundFunction();
 		auto &context = input.GetClientContext();
 
 		auto result = make_uniq<BindData>();
 
 		// Extract parameters
-		auto folded_extent = false;
-		auto folded_buffer = false;
-		auto folded_clip = false;
 
 		if (arguments.size() >= 3) {
 			auto &extent_expr = arguments[2];
 			if (extent_expr->IsFoldable()) {
 				auto extent_val = ExpressionExecutor::EvaluateScalar(context, *extent_expr);
 				result->extent = extent_val.GetValue<int32_t>();
-				folded_extent = true;
 			} else {
 				throw InvalidInputException("ST_AsMVTGeom: \"tile_extent\" must be a constant");
 			}
@@ -258,7 +253,6 @@ struct ST_AsMVTGeom {
 			if (buffer_expr->IsFoldable()) {
 				auto buffer_val = ExpressionExecutor::EvaluateScalar(context, *buffer_expr);
 				result->buffer = buffer_val.GetValue<int32_t>();
-				folded_buffer = true;
 			} else {
 				throw InvalidInputException("ST_AsMVTGeom: \"buffer\" must be a constant");
 			}
@@ -268,22 +262,12 @@ struct ST_AsMVTGeom {
 			if (clip_geom_expr->IsFoldable()) {
 				auto clip_geom_val = ExpressionExecutor::EvaluateScalar(context, *clip_geom_expr);
 				result->clip = clip_geom_val.GetValue<bool>();
-				folded_clip = true;
 			} else {
 				throw InvalidInputException("ST_AsMVTGeom: \"clip_geom\" must be a constant");
 			}
 		}
 
-		// Erase back to front
-		if (folded_clip) {
-			Function::EraseArgument(bound_function, arguments, 4);
-		}
-		if (folded_buffer) {
-			Function::EraseArgument(bound_function, arguments, 3);
-		}
-		if (folded_extent) {
-			Function::EraseArgument(bound_function, arguments, 2);
-		}
+		// the folded arguments stay part of the expression tree - Execute only reads the leading two arguments
 
 		return std::move(result);
 	}
