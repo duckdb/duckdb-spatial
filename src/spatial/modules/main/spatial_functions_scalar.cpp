@@ -18,6 +18,8 @@
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/common/vector_operations/variadic_executor.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
+#include "duckdb/common/serializer/serializer.hpp"
+#include "duckdb/common/serializer/deserializer.hpp"
 
 #include "spatial/util/distance_extract.hpp"
 #include "spatial/spatial_settings.hpp"
@@ -2083,7 +2085,7 @@ struct ST_Contains {
 						// return Contains::ON_EDGE;
 						contains = false;
 						break;
-					} else if (side == Side::LEFT && (y1 < y && y <= y2)) {
+					} else if (side == Side::LEFT && (y1 <= y && y < y2)) {
 						winding_number++;
 					} else if (side == Side::RIGHT && (y2 <= y && y < y1)) {
 						winding_number--;

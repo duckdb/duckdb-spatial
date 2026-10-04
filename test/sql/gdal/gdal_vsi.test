@@ -1,3 +1,6 @@
+# name: test/sql/gdal/gdal_vsi.test
+# group: [gdal]
+
 require spatial
 
 # Test read via VSI

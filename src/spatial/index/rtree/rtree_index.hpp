@@ -12,6 +12,7 @@
 namespace duckdb {
 
 class PhysicalOperator;
+class DuckTransaction;
 
 class RTreeIndex final : public BoundIndex {
 public:
@@ -33,6 +34,20 @@ public:
 
 	unique_ptr<IndexScanState> InitializeScan(const Box2D<float> &query) const;
 	idx_t Scan(IndexScanState &state, Vector &result) const;
+
+	//! Estimate the fraction of indexed rows whose bounds intersect the query bounds, by walking the top of the R-tree
+	double EstimateSelectivity(const RTreeBounds &query) const;
+
+	//! Whether an index scan over the given query bounds is estimated to be selective enough to beat a full table scan
+	bool ShouldUseIndexScan(ClientContext &context, const RTreeBounds &query, idx_t total_rows) const;
+
+	//! The number of rows above which a full table scan is preferred over an index scan
+	static idx_t MaxIndexScanRows(ClientContext &context, idx_t total_rows);
+
+	//! Whether the index may be missing rows that are still visible to the given transaction.
+	//! Committed deletes are removed from the index right away (we do not keep them in a delta index), so a transaction
+	//! whose snapshot predates such a commit cannot rely on the index. The index must be (at least) read-locked.
+	bool MayMissVisibleRows(const DuckTransaction &transaction) const;
 
 	static unique_ptr<BoundIndex> Create(CreateIndexInput &input) {
 		auto res = make_uniq<RTreeIndex>(input.name, input.constraint_type, input.column_ids, input.table_io_manager,
@@ -84,6 +99,13 @@ public:
 	                                     DataChunk &input) const override {
 		return "Constraint violation in RTree index";
 	}
+
+private:
+	//! Whether entries have ever been deleted from this index
+	bool has_deletes = false;
+	//! The last completed commit at the time of the latest delete. The delete itself belongs to a later commit, which
+	//! is still in progress for as long as this equals the last completed commit.
+	transaction_t last_commit_before_delete = 0;
 };
 
 } // namespace duckdb

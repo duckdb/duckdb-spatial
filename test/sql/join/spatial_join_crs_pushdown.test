@@ -1,0 +1,50 @@
+# name: test/sql/join/spatial_join_crs_pushdown.test
+# group: [join]
+
+# Regression test: the bounding-box filter the spatial join pushes into the probe-side scan used to
+# reference the probe column with a plain GEOMETRY type. For columns typed GEOMETRY with a CRS this
+# tripped D_ASSERT(other.GetType() == GetType()) in Vector::Reference on debug builds (release builds
+# only worked by accident). The filter's column reference now carries the column's exact type.
+require spatial
+
+statement ok
+PRAGMA threads=4;
+
+statement ok
+CREATE TABLE cprobe (geom GEOMETRY('OGC:CRS84'));
+
+statement ok
+INSERT INTO cprobe SELECT ST_Point(x, y)::GEOMETRY('OGC:CRS84') FROM range(0, 100) r1(x), range(0, 100) r2(y);
+
+statement ok
+CREATE TABLE cbuild (geom GEOMETRY('OGC:CRS84'));
+
+statement ok
+INSERT INTO cbuild VALUES (ST_Point(50.5, 50.5)::GEOMETRY('OGC:CRS84'));
+
+# CRS-typed probe column, no index: exercises the pushed filter on a plain seq scan
+query I
+SELECT count(*) FROM cprobe p JOIN cbuild b ON ST_DWithin(p.geom, b.geom, 3.0);
+----
+32
+
+statement ok
+CREATE INDEX cprobe_idx ON cprobe USING RTREE (geom);
+
+# With an R-tree index: exercises the deferred-bounds index scan over a CRS-typed column
+query I
+SELECT count(*) FROM cprobe p JOIN cbuild b ON ST_DWithin(p.geom, b.geom, 3.0);
+----
+32
+
+# Mixed: CRS-typed probe column, plain GEOMETRY build side
+statement ok
+CREATE TABLE pbuild (geom GEOMETRY);
+
+statement ok
+INSERT INTO pbuild VALUES (ST_Point(50.5, 50.5));
+
+query I
+SELECT count(*) FROM cprobe p JOIN pbuild b ON ST_DWithin(p.geom, b.geom, 3.0);
+----
+32

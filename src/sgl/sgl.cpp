@@ -787,6 +787,9 @@ bool multi_linestring::is_closed(const geometry &geom) {
 }
 
 bool linestring::interpolate(const geometry &geom, double frac, vertex_xyzm &out) {
+	if (std::isnan(frac)) {
+		return false;
+	}
 	if (geom.get_type() != geometry_type::LINESTRING) {
 		return false;
 	}
@@ -818,6 +821,10 @@ bool linestring::interpolate(const geometry &geom, double frac, vertex_xyzm &out
 	}
 
 	const auto actual_length = ops::get_length(geom);
+	if (actual_length == 0) {
+		memcpy(&out, vertex_array, vertex_width);
+		return true;
+	}
 	const auto target_length = actual_length * frac;
 
 	// Compute the length of each segment, stop when we reach the target length
@@ -834,6 +841,10 @@ bool linestring::interpolate(const geometry &geom, double frac, vertex_xyzm &out
 		const auto dy = next.y - prev.y;
 
 		const auto segment_length = std::sqrt(dx * dx + dy * dy);
+		if (segment_length == 0) {
+			prev = next;
+			continue;
+		}
 
 		if (length + segment_length >= target_length) {
 			const auto remaining = target_length - length;
@@ -848,7 +859,8 @@ bool linestring::interpolate(const geometry &geom, double frac, vertex_xyzm &out
 		prev = next;
 	}
 
-	return false;
+	memcpy(&out, vertex_array + (vertex_count - 1) * vertex_width, vertex_width);
+	return true;
 }
 
 void linestring::interpolate_points(allocator &alloc, const geometry &geom, double frac, geometry &result) {
@@ -860,7 +872,7 @@ void linestring::interpolate_points(allocator &alloc, const geometry &geom, doub
 		result.set_type(geometry_type::POINT);
 		return;
 	}
-	if (geom.is_empty()) {
+	if (geom.is_empty() || std::isnan(frac)) {
 		result.set_type(geometry_type::POINT);
 		return;
 	}
@@ -891,10 +903,16 @@ void linestring::interpolate_points(allocator &alloc, const geometry &geom, doub
 		return;
 	}
 
+	const auto actual_length = ops::get_length(geom); // TODO: use linstring::length
+	if (actual_length == 0 || (frac * actual_length) <= 0.0) {
+		result.set_type(geometry_type::POINT);
+		result.set_vertex_array(vertex_array, 1);
+		return;
+	}
+
 	// Make a multi-point
 	result.set_type(geometry_type::MULTI_POINT);
 
-	const auto actual_length = ops::get_length(geom); // TODO: use linstring::length
 	double total_length = 0.0;
 	double next_target = frac * actual_length;
 
@@ -910,6 +928,10 @@ void linestring::interpolate_points(allocator &alloc, const geometry &geom, doub
 		const auto dy = next.y - prev.y;
 
 		const auto segment_length = std::sqrt(dx * dx + dy * dy);
+		if (segment_length == 0) {
+			prev = next;
+			continue;
+		}
 
 		// There can be multiple points on the same segment, so we need to loop here
 		while (total_length + segment_length >= next_target) {
@@ -1442,6 +1464,10 @@ void linestring::substring(allocator &alloc, const geometry &geom, double beg_fr
 		return;
 	}
 
+	if (std::isnan(beg_frac) || std::isnan(end_frac)) {
+		return;
+	}
+
 	if (beg_frac > end_frac) {
 		return;
 	}
@@ -1455,7 +1481,14 @@ void linestring::substring(allocator &alloc, const geometry &geom, double beg_fr
 
 	// Reference the whole line
 	if (beg_frac == 0 && end_frac == 1) {
-		result.set_vertex_array(vertex_array, vertex_count);
+		if (vertex_count == 1) {
+			const auto mem = static_cast<char *>(alloc.alloc(vertex_width * 2));
+			memcpy(mem, vertex_array, vertex_width);
+			memcpy(mem + vertex_width, vertex_array, vertex_width);
+			result.set_vertex_array(mem, 2);
+		} else {
+			result.set_vertex_array(vertex_array, vertex_count);
+		}
 		return;
 	}
 
@@ -1481,6 +1514,17 @@ void linestring::substring(allocator &alloc, const geometry &geom, double beg_fr
 	size_t end_idx = 0;
 
 	const double total_length = ops::get_length(geom); // TODO: use linstring::length
+	if (total_length == 0) {
+		if (vertex_count == 1) {
+			const auto mem = static_cast<char *>(alloc.alloc(vertex_width * 2));
+			memcpy(mem, vertex_array, vertex_width);
+			memcpy(mem + vertex_width, vertex_array, vertex_width);
+			result.set_vertex_array(mem, 2);
+		} else {
+			result.set_vertex_array(vertex_array, vertex_count);
+		}
+		return;
+	}
 	const double beg_length = total_length * beg_frac;
 	const double end_length = total_length * end_frac;
 	double length = 0.0;
@@ -1498,6 +1542,16 @@ void linestring::substring(allocator &alloc, const geometry &geom, double beg_fr
 		const auto dx = next.x - prev.x;
 		const auto dy = next.y - prev.y;
 		const auto segment_length = std::sqrt(dx * dx + dy * dy);
+
+		if (segment_length == 0) {
+			if (length >= beg_length) {
+				beg = prev;
+				beg_idx = vertex_idx - 1;
+				break;
+			}
+			prev = next;
+			continue;
+		}
 
 		if (length + segment_length >= beg_length) {
 			const auto remaining = beg_length - length;
@@ -1521,6 +1575,16 @@ void linestring::substring(allocator &alloc, const geometry &geom, double beg_fr
 		const auto dy = next.y - prev.y;
 		const auto segment_length = std::sqrt(dx * dx + dy * dy);
 
+		if (segment_length == 0) {
+			if (length >= end_length) {
+				end = prev;
+				end_idx = vertex_idx - 1;
+				break;
+			}
+			prev = next;
+			continue;
+		}
+
 		if (length + segment_length >= end_length) {
 			const auto remaining = end_length - length;
 			const auto sfrac = remaining / segment_length;
@@ -1534,6 +1598,11 @@ void linestring::substring(allocator &alloc, const geometry &geom, double beg_fr
 		}
 		length += segment_length;
 		prev = next;
+	}
+
+	if (vertex_idx == vertex_count) {
+		end = next;
+		end_idx = vertex_count - 2;
 	}
 
 	// Now create a new line containing beg, all the points in between, and end
@@ -2078,7 +2147,7 @@ bool distance_point_lines(const geometry &lhs, const geometry &rhs, distance_res
 		return true;
 	}
 
-	// Special case: prepared
+	// Special case: prepared. This is only a fast path, fall through to the loop below if it yields no distance
 	if (rhs.is_prepared()) {
 		auto &prep = static_cast<const prepared_geometry &>(rhs);
 		double dist = 0;
@@ -2086,7 +2155,6 @@ bool distance_point_lines(const geometry &lhs, const geometry &rhs, distance_res
 			result.set(dist);
 			return true;
 		}
-		return false;
 	}
 
 	const auto rhs_vertex_width = rhs.get_vertex_width();
@@ -2150,7 +2218,9 @@ bool distance_lines_lines(const geometry &lhs, const geometry &rhs, distance_res
 	}
 
 	if (lhs.is_prepared() && rhs.is_prepared()) {
-		// Both linestrings are prepared, so we can use the prepared distance
+		// Both linestrings are prepared, so we can try the indexed distance first.
+		// This is only a fast path: if it does not produce a distance (e.g. because every segment is zero-length,
+		// which the indexed search skips), fall through to the loops below, which handle those cases.
 		auto &lhs_prep = static_cast<const prepared_geometry &>(lhs);
 		auto &rhs_prep = static_cast<const prepared_geometry &>(rhs);
 		double dist = 0;
@@ -2158,7 +2228,6 @@ bool distance_lines_lines(const geometry &lhs, const geometry &rhs, distance_res
 			result.set(dist);
 			return true;
 		}
-		return false;
 	}
 
 	const auto lhs_vertex_array = lhs.get_vertex_array();
@@ -3210,10 +3279,10 @@ static double point_segment_dist_sq(const vertex_xy &p, const vertex_xy &a, cons
 	return diff.norm_sq();
 }
 
-// Check if point P is on segment QR
+// Check if point P, known to be collinear with segment QR, lies within the extent of QR (and therefore on it)
 static bool point_on_segment(const vertex_xy &p, const vertex_xy &q, const vertex_xy &r) {
-	return q.x >= std::min(p.x, r.x) && q.x <= std::max(p.x, r.x) && q.y >= std::min(p.y, r.y) &&
-	       q.y <= std::max(p.y, r.y);
+	return p.x >= std::min(q.x, r.x) && p.x <= std::max(q.x, r.x) && p.y >= std::min(q.y, r.y) &&
+	       p.y <= std::max(q.y, r.y);
 }
 
 static bool segment_intersects(const vertex_xy &a1, const vertex_xy &a2, const vertex_xy &b1, const vertex_xy &b2) {
@@ -3228,11 +3297,11 @@ static bool segment_intersects(const vertex_xy &a1, const vertex_xy &a2, const v
 	}
 	if (a_is_point) {
 		// A is a point: check if A lies on segment B
-		return point_on_segment(a1, b1, b2);
+		return orient2d_fast(b1, b2, a1) == 0 && point_on_segment(a1, b1, b2);
 	}
 	if (b_is_point) {
 		// B is a point: check if B lies on segment A
-		return point_on_segment(b1, a1, a2);
+		return orient2d_fast(a1, a2, b1) == 0 && point_on_segment(b1, a1, a2);
 	}
 
 	const auto o1 = orient2d_fast(a1, a2, b1);
@@ -3244,17 +3313,17 @@ static bool segment_intersects(const vertex_xy &a1, const vertex_xy &a2, const v
 		return true; // Segments intersect
 	}
 
-	if (o1 == 0 && point_on_segment(a1, b1, b2)) {
-		return true; // a1 is collinear with b1 and b2
+	if (o1 == 0 && point_on_segment(b1, a1, a2)) {
+		return true; // b1 is collinear with a1 and a2, and lies on segment A
 	}
-	if (o2 == 0 && point_on_segment(a2, b1, b2)) {
-		return true; // a2 is collinear with b1 and b2
+	if (o2 == 0 && point_on_segment(b2, a1, a2)) {
+		return true; // b2 is collinear with a1 and a2, and lies on segment A
 	}
-	if (o3 == 0 && point_on_segment(b1, a1, a2)) {
-		return true; // b1 is collinear with a1 and a2
+	if (o3 == 0 && point_on_segment(a1, b1, b2)) {
+		return true; // a1 is collinear with b1 and b2, and lies on segment B
 	}
-	if (o4 == 0 && point_on_segment(b2, a1, a2)) {
-		return true; // b2 is collinear with a1 and a2
+	if (o4 == 0 && point_on_segment(a2, b1, b2)) {
+		return true; // a2 is collinear with b1 and b2, and lies on segment B
 	}
 
 	return false; // Segments do not intersect
@@ -4090,6 +4159,7 @@ bool wkb_reader::try_parse(geometry &out, const char *buf_ptr, const char *end_p
 
 	le = false;
 	type_id = 0;
+	has_mixed_zm = false;
 	has_any_m = false;
 	has_any_z = false;
 
@@ -4120,10 +4190,11 @@ bool wkb_reader::try_parse(geometry &out, const char *buf_ptr, const char *end_p
 		geom->set_z(has_z);
 		geom->set_m(has_m);
 
+		has_any_z |= has_z;
+		has_any_m |= has_m;
+
 		// Compare with root
 		if (!has_mixed_zm && (out.has_m() != has_m || out.has_z() != has_z)) {
-			has_any_z |= has_z;
-			has_any_m |= has_m;
 			has_mixed_zm = true;
 			if (!allow_mixed_zm) {
 				// Error out!
@@ -4207,8 +4278,11 @@ bool wkb_reader::try_parse(geometry &out, const char *buf_ptr, const char *end_p
 
 			if (stack_depth == 0) {
 				SGL_ASSERT(parent == nullptr);
-				// Done!
-				return true;
+				if (pos == end) {
+					return true;
+				}
+				error = wkb_reader_error::TRAILING_DATA;
+				return false;
 			}
 
 			SGL_ASSERT(parent != nullptr);
@@ -4266,6 +4340,7 @@ bool wkb_reader::try_parse_stats(extent_xy &out_extent, size_t &out_vertex_count
 
 	le = false;
 	type_id = 0;
+	has_mixed_zm = false;
 	has_any_m = false;
 	has_any_z = false;
 
@@ -4430,7 +4505,10 @@ bool wkb_reader::try_parse_stats(extent_xy &out_extent, size_t &out_vertex_count
 
 		while (true) {
 			if (stack_depth == 0) {
-				// We reached the bottom, return!
+				if (pos != end) {
+					error = wkb_reader_error::TRAILING_DATA;
+					return false;
+				}
 				out_vertex_count = vertex_count;
 				out_extent = extent;
 				return true;
@@ -4460,6 +4538,9 @@ const char *wkb_reader::get_error_message() const {
 	}
 	case wkb_reader_error::MIXED_ZM: {
 		return "Mixed Z and M values are not allowed";
+	}
+	case wkb_reader_error::TRAILING_DATA: {
+		return "Unexpected trailing data after WKB geometry";
 	}
 	case wkb_reader_error::RECURSION_LIMIT: {
 		const auto msg_fmt = "Recursion limit '%u' reached";

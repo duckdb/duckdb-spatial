@@ -1,0 +1,112 @@
+# name: test/sql/join/spatial_join_filter_pushdown.test
+# description: Test bounding-box filter pushdown into the probe side of the spatial join
+# group: [join]
+
+require spatial
+
+statement ok
+PRAGMA enable_verification
+
+# Probe side: a 11x11 grid of points (0,0) .. (100,100)
+statement ok
+CREATE TABLE probe AS
+SELECT ST_Point(x, y) AS geom, (y * 11) + (x // 10) AS id
+FROM generate_series(0, 100, 10) r1(x), generate_series(0, 100, 10) r2(y);
+
+# Build side: a single envelope covering [20,20] .. [50,50]
+statement ok
+CREATE TABLE build AS SELECT ST_MakeEnvelope(20, 20, 50, 50) AS geom;
+
+# INNER: points inside [20,50]x[20,50] -> x in {20,30,40,50}, y in {20,30,40,50} = 16
+query I
+SELECT count(*) FROM probe, build WHERE ST_Intersects(probe.geom, build.geom);
+----
+16
+
+# INNER: filter is pushed into the probe scan
+query II
+EXPLAIN ANALYZE SELECT count(*) FROM probe, build WHERE ST_Intersects(probe.geom, build.geom);
+----
+analyzed_plan	<REGEX>:.*st_intersects_extent.*
+
+# The pushed filter must be OPTIONAL: it is redundant with the join (which checks every probe row
+# exactly), so it should only prune row groups via zonemaps and feed the deferred R-tree scan its
+# bounds, not be evaluated per row on top of the join's own check.
+query II
+EXPLAIN ANALYZE SELECT count(*) FROM probe, build WHERE ST_Intersects(probe.geom, build.geom);
+----
+analyzed_plan	<REGEX>:.*optional:.*
+
+# RIGHT: probe side can still be filtered; single build row matches 16 probe rows
+query I
+SELECT count(*) FROM probe RIGHT JOIN build ON ST_Intersects(probe.geom, build.geom);
+----
+16
+
+# RIGHT: filter is pushed into the probe scan
+query II
+EXPLAIN ANALYZE SELECT count(*) FROM probe RIGHT JOIN build ON ST_Intersects(probe.geom, build.geom);
+----
+analyzed_plan	<REGEX>:.*st_intersects_extent.*
+
+# LEFT: every probe row must be preserved (no pushdown) -> 121
+query I
+SELECT count(*) FROM probe LEFT JOIN build ON ST_Intersects(probe.geom, build.geom);
+----
+121
+
+# LEFT: filter must NOT be pushed (probe rows must all be preserved)
+query II
+EXPLAIN ANALYZE SELECT count(*) FROM probe LEFT JOIN build ON ST_Intersects(probe.geom, build.geom);
+----
+analyzed_plan	<!REGEX>:.*st_intersects_extent.*
+
+# FULL OUTER: every probe row preserved, build row matched -> 121
+query I
+SELECT count(*) FROM probe FULL OUTER JOIN build ON ST_Intersects(probe.geom, build.geom);
+----
+121
+
+# FULL OUTER: filter must NOT be pushed
+query II
+EXPLAIN ANALYZE SELECT count(*) FROM probe FULL OUTER JOIN build ON ST_Intersects(probe.geom, build.geom);
+----
+analyzed_plan	<!REGEX>:.*st_intersects_extent.*
+
+# ST_DWithin with constant distance: box is expanded by the distance before pruning
+# d=10 -> 16 inside + 8 (dx=0,dy=10) + 8 (dx=10,dy=0) = 32
+query I
+SELECT count(*) FROM probe, build WHERE ST_DWithin(probe.geom, build.geom, 10.0);
+----
+32
+
+# DWithin: filter is pushed into the probe scan (box expanded by the distance)
+query II
+EXPLAIN ANALYZE SELECT count(*) FROM probe, build WHERE ST_DWithin(probe.geom, build.geom, 10.0);
+----
+analyzed_plan	<REGEX>:.*st_intersects_extent.*
+
+# Probe key that is not a plain column reference (ST_Centroid) -> pushdown skipped, still correct
+query I
+SELECT count(*) FROM probe, build WHERE ST_Intersects(ST_Centroid(probe.geom), build.geom);
+----
+16
+
+# ST_Centroid: probe key is not a plain column reference -> filter must NOT be pushed
+query II
+EXPLAIN ANALYZE SELECT count(*) FROM probe, build WHERE ST_Intersects(ST_Centroid(probe.geom), build.geom);
+----
+analyzed_plan	<!REGEX>:.*st_intersects_extent.*
+
+# Inverse predicate (build contains probe) -> predicate flipped, probe still filtered.
+# ST_Contains is strict, so boundary points (x or y in {20,50}) are excluded: interior is x in {30,40}, y in {30,40} = 4
+query I
+SELECT count(*) FROM probe, build WHERE ST_Contains(build.geom, probe.geom);
+----
+4
+
+# Inverse predicate: filter is still pushed into the probe scan after flipping
+query II
+EXPLAIN ANALYZE SELECT count(*) FROM probe, build WHERE ST_Contains(build.geom, probe.geom);
+----
+analyzed_plan	<REGEX>:.*st_intersects_extent.*

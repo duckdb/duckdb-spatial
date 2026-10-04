@@ -20,6 +20,11 @@ SELECT count(*) FROM t1 WHERE ST_Within(geom, ST_MakeEnvelope(-74.004936,40.7252
 statement ok
 CREATE INDEX my_idx ON t1 USING RTREE (geom);
 
+# The envelope matches ~16% of the rows, so the cost model would (correctly) prefer a table scan here.
+# This test is about the index scan itself: force it.
+statement ok
+SET rtree_index_scan_ratio = 1.0;
+
 query II
 EXPLAIN SELECT count(*) FROM t1 WHERE ST_Within(geom, ST_MakeEnvelope(-74.004936,40.725275,-73.982620,40.745046));
 ----

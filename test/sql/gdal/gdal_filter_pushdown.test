@@ -1,4 +1,10 @@
+# name: test/sql/gdal/gdal_filter_pushdown.test
+# group: [gdal]
+
 require spatial
+
+statement ok
+SET profiling_renderer_settings = MAP {'operator_casing': 'upper'};
 
 statement ok
 COPY (

@@ -58,3 +58,51 @@ MULTIPOLYGON EMPTY
 MULTIPOLYGON (((0 0, 1 0, 1 1, 0 1, 0 0)), ((2 2, 3 2, 3 3, 2 3, 2 2)))
 GEOMETRYCOLLECTION EMPTY
 GEOMETRYCOLLECTION (POINT (0 0), LINESTRING (0 0, 1 1))
+
+#---------------------------------------------------------------------------------------
+# Issue #866: Zero-length WKB blob in column context must raise catchable InvalidInputException
+#---------------------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE empty_wkb AS SELECT ''::BLOB AS w;
+
+statement error
+SELECT ST_GeometryType(ST_GeomFromWKB(w)) FROM empty_wkb;
+----
+Invalid Input Error: Unexpected end of binary data at position 0
+
+statement error
+SELECT ST_IsEmpty(ST_GeomFromWKB(w)) FROM empty_wkb;
+----
+Invalid Input Error: Unexpected end of binary data at position 0
+
+statement error
+SELECT ST_Dimension(ST_GeomFromWKB(w)) FROM empty_wkb;
+----
+Invalid Input Error: Unexpected end of binary data at position 0
+
+statement error
+SELECT ST_NPoints(ST_GeomFromWKB(w)) FROM empty_wkb;
+----
+Invalid Input Error: Unexpected end of binary data at position 0
+
+statement error
+SELECT ST_X(ST_GeomFromWKB(w)) FROM empty_wkb;
+----
+Invalid Input Error: Unexpected end of binary data at position 0
+
+# TRY() should catch the error and return NULL
+query I
+SELECT TRY(ST_GeometryType(ST_GeomFromWKB(w))) FROM empty_wkb;
+----
+NULL
+
+query I
+SELECT TRY(ST_IsEmpty(ST_GeomFromWKB(w))) FROM empty_wkb;
+----
+NULL
+
+query I
+SELECT TRY(ST_Dimension(ST_GeomFromWKB(w))) FROM empty_wkb;
+----
+NULL

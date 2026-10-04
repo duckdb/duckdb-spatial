@@ -1,3 +1,6 @@
+# name: test/sql/shapefile/test_shapefile_read.test
+# group: [shapefile]
+
 require spatial
 
 # Test that we can round-trip by writing from GDAL and reading back in

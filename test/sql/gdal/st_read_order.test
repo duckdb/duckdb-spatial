@@ -1,3 +1,6 @@
+# name: test/sql/gdal/st_read_order.test
+# group: [gdal]
+
 require spatial
 
 # Test that the projection order (i.e. order of columns) dont break anything

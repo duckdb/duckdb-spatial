@@ -1,3 +1,5 @@
+# name: test/sql/export_import_csv.test
+# group: [sql]
 
 require spatial
 

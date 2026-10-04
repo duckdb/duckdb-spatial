@@ -11,12 +11,15 @@
 #include "duckdb/execution/index/fixed_size_allocator.hpp"
 #include "duckdb/storage/table/scan_state.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/transaction/duck_transaction.hpp"
+#include "duckdb/transaction/duck_transaction_manager.hpp"
 #include "spatial/spatial_types.hpp"
 #include "spatial/geometry/geometry_serialization.hpp"
 
 #include "spatial/index/rtree/rtree_module.hpp"
 #include "spatial/index/rtree/rtree_node.hpp"
 #include "spatial/index/rtree/rtree_scanner.hpp"
+#include "spatial/spatial_settings.hpp"
 #include "spatial/util/math.hpp"
 
 namespace duckdb {
@@ -162,6 +165,82 @@ idx_t RTreeIndex::Scan(IndexScanState &state, Vector &result) const {
 	return output_idx;
 }
 
+//! Estimate the fraction of indexed rows whose bounds intersect the query, by descending the top levels of the R-tree
+//! and partition each node's weight equally over its children. Node capacities are bounded (min/max capacity), so
+//! same-level subtrees hold roughly equal row counts, which makes this a much better estimate on spatially skewed data
+//! After the node budget is exhausted, remaining partial overlaps fall back to a fractional area estimate.
+static double EstimateOverlap(const RTree &tree, const RTreeEntry &entry, const RTreeBounds &query,
+                              idx_t &node_budget) {
+	if (!query.Intersects(entry.bounds)) {
+		// Disjoint: nothing below this entry can match
+		return 0.0;
+	}
+	if (query.Contains(entry.bounds)) {
+		// Fully contained: everything below this entry matches
+		return 1.0;
+	}
+	// Partial overlap: refine by descending into the node, while we still have budget
+	if (entry.pointer.IsPage() && node_budget != 0) {
+		node_budget--;
+		auto &node = tree.Ref(entry.pointer);
+		const auto count = node.GetCount();
+		if (count == 0) {
+			return 0.0;
+		}
+		double sum = 0;
+		for (idx_t i = 0; i < count; i++) {
+			sum += EstimateOverlap(tree, node.begin()[i], query, node_budget);
+		}
+		// Each child holds roughly an equal share of this subtree's rows
+		return sum / static_cast<double>(count);
+	}
+	// Budget exhausted (or this is a row id): fall back to the fractional bounding-box overlap
+	const auto area = entry.bounds.Area();
+	if (area <= 0) {
+		// Degenerate bounds (e.g. a point): it intersects the query, so count it fully
+		return 1.0;
+	}
+	return static_cast<double>(entry.bounds.OverlapArea(query)) / static_cast<double>(area);
+}
+
+double RTreeIndex::EstimateSelectivity(const RTreeBounds &query) const {
+	// Bounds the number of nodes the estimate may visit.
+	// Only nodes *partially* overlapping the query consume budget (disjoint and contained subtrees resolve immediately)
+	// so this covers the query boundary of trees far larger than 256 nodes.
+	// With the min node capacity of 50, two fully descended levels resolve to ~1/(50*50) = 0.04% of the indexed rows,
+	// far below the default 7.5% rtree_index_scan_ratio threshold the estimate is compared to.
+	static constexpr idx_t ESTIMATE_NODE_BUDGET = 256;
+
+	idx_t node_budget = ESTIMATE_NODE_BUDGET;
+	return EstimateOverlap(*tree, tree->GetRoot(), query, node_budget);
+}
+
+idx_t RTreeIndex::MaxIndexScanRows(ClientContext &context, idx_t total_rows) {
+	const auto max_ratio = SpatialSettings::RTreeIndexScanRatio(context);
+	const auto min_rows = SpatialSettings::RTreeIndexScanMinRows(context);
+	// Below the ratio threshold, or small enough in absolute terms that the plan choice does not matter
+	return MaxValue<idx_t>(LossyNumericCast<idx_t>(max_ratio * static_cast<double>(total_rows)), min_rows);
+}
+
+bool RTreeIndex::ShouldUseIndexScan(ClientContext &context, const RTreeBounds &query, idx_t total_rows) const {
+	const auto estimated_rows = EstimateSelectivity(query) * static_cast<double>(total_rows);
+	return estimated_rows <= static_cast<double>(MaxIndexScanRows(context, total_rows));
+}
+
+bool RTreeIndex::MayMissVisibleRows(const DuckTransaction &transaction) const {
+	if (!has_deletes) {
+		return false;
+	}
+	// Start and commit timestamps are drawn from the same counter, and commits are serialized
+	const auto last_commit = DuckTransactionManager::Get(db).GetLastCommit();
+	if (last_commit == last_commit_before_delete) {
+		// The commit that performed the latest delete is still in progress, and started after this transaction
+		return true;
+	}
+	// Something committed after this transaction started, which may have deleted rows this transaction still sees
+	return last_commit > transaction.start_time;
+}
+
 void RTreeIndex::ResetStorage(IndexLock &index_lock) {
 	// TODO: Maybe we can drop these much earlier?
 	tree->Reset();
@@ -170,7 +249,6 @@ void RTreeIndex::ResetStorage(IndexLock &index_lock) {
 template <class CALLBACK = std::function<void(const RTreeEntry &)>>
 static void ConvertToEntries(Vector &box_vec, Vector &rowid_vec, idx_t count, CALLBACK &&callback) {
 	const auto &box_validity = FlatVector::Validity(box_vec);
-	const auto &row_validity = FlatVector::Validity(rowid_vec);
 
 	auto &box_entries = StructVector::GetEntries(box_vec);
 	const auto box_xmin_data = FlatVector::GetData<float>(box_entries[0]);
@@ -178,10 +256,12 @@ static void ConvertToEntries(Vector &box_vec, Vector &rowid_vec, idx_t count, CA
 	const auto box_xmax_data = FlatVector::GetData<float>(box_entries[2]);
 	const auto box_ymax_data = FlatVector::GetData<float>(box_entries[3]);
 
-	const auto row_data = FlatVector::GetData<row_t>(rowid_vec);
+	// The row ids are not necessarily flat (e.g. when replaying appends and deletes from the WAL)
+	const auto row_ids = rowid_vec.Values<row_t>();
 
 	for (idx_t i = 0; i < count; i++) {
-		if (!box_validity.RowIsValid(i) || !row_validity.RowIsValid(i)) {
+		const auto row_entry = row_ids[i];
+		if (!box_validity.RowIsValid(i) || !row_entry.IsValid()) {
 			continue;
 		}
 
@@ -191,9 +271,7 @@ static void ConvertToEntries(Vector &box_vec, Vector &rowid_vec, idx_t count, CA
 		box.max.x = box_xmax_data[i];
 		box.max.y = box_ymax_data[i];
 
-		const auto row = row_data[i];
-
-		RTreeEntry new_entry = {RTree::MakeRowId(row), box};
+		RTreeEntry new_entry = {RTree::MakeRowId(row_entry.GetValue()), box};
 
 		// Invoke the callback with the new entry
 		callback(new_entry);
@@ -201,6 +279,7 @@ static void ConvertToEntries(Vector &box_vec, Vector &rowid_vec, idx_t count, CA
 }
 
 ErrorData RTreeIndex::Insert(IndexLock &lock, DataChunk &input, Vector &row_vec) {
+	const auto count = input.size();
 
 	key_chunk.Reset();
 	key_executor->ExecuteExpression(input, key_chunk.data[0]);
@@ -208,7 +287,7 @@ ErrorData RTreeIndex::Insert(IndexLock &lock, DataChunk &input, Vector &row_vec)
 
 	auto &box_vec = key_chunk.data[0];
 
-	ConvertToEntries(box_vec, row_vec, input.size(), [&](const RTreeEntry &entry) { tree->Insert(entry); });
+	ConvertToEntries(box_vec, row_vec, count, [&](const RTreeEntry &entry) { tree->Insert(entry); });
 
 	return ErrorData {};
 }
@@ -233,6 +312,10 @@ void RTreeIndex::Delete(IndexLock &lock, DataChunk &input, Vector &row_vec) {
 
 	auto &box_vec = key_chunk.data[0];
 	ConvertToEntries(box_vec, row_vec, count, [&](const RTreeEntry &entry) { tree->Delete(entry); });
+
+	// Deletes are applied while their commit is in progress, i.e. before it is published as the last commit
+	has_deletes = true;
+	last_commit_before_delete = DuckTransactionManager::Get(db).GetLastCommit();
 }
 
 IndexStorageInfo RTreeIndex::SerializeToDisk(QueryContext context, const case_insensitive_map_t<Value> &options) {

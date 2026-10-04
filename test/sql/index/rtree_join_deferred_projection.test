@@ -1,0 +1,50 @@
+# name: test/sql/index/rtree_join_deferred_projection.test
+# group: [index]
+
+# Regression test: rewriting a spatial-join probe scan into a deferred-bounds R-tree index scan used
+# to break the plan when the scan had pushed-down table filters AND a projection that dropped the
+# filter column: clearing the get's projection_ids shifted its column bindings without anything
+# restoring them, failing with "INTERNAL Error: Failed to bind column reference".
+# The pulled-up filter now carries a projection map that restores the scan's original output shape.
+require spatial
+
+statement ok
+PRAGMA threads=4;
+
+statement ok
+CREATE TABLE probe AS SELECT row_number() OVER () AS id, (row_number() OVER ()) % 10 AS cat, point::GEOMETRY AS geom
+FROM st_generatepoints({min_x: 0, min_y: 0, max_x: 1000, max_y: 1000}::BOX_2D, 20_000, 42);
+
+statement ok
+CREATE TABLE probe_noidx AS FROM probe;
+
+statement ok
+CREATE INDEX probe_idx ON probe USING RTREE (geom);
+
+statement ok
+CREATE TABLE build AS SELECT point::GEOMETRY AS geom
+FROM st_generatepoints({min_x: 480, min_y: 480, max_x: 520, max_y: 520}::BOX_2D, 100, 7);
+
+# Pushed-down filter on id, projection keeps only cat and geom (the filter column is projected out)
+query I
+SELECT (SELECT sum(p.cat) FROM probe p JOIN build b ON ST_Intersects(p.geom, b.geom) WHERE p.id < 10000)
+     IS NOT DISTINCT FROM
+       (SELECT sum(p.cat) FROM probe_noidx p JOIN build b ON ST_Intersects(p.geom, b.geom) WHERE p.id < 10000);
+----
+true
+
+# Same, with the filter column also in the output
+query I
+SELECT (SELECT count(*) + sum(p.id) FROM probe p JOIN build b ON ST_DWithin(p.geom, b.geom, 5.0) WHERE p.id < 10000)
+     IS NOT DISTINCT FROM
+       (SELECT count(*) + sum(p.id) FROM probe_noidx p JOIN build b ON ST_DWithin(p.geom, b.geom, 5.0) WHERE p.id < 10000);
+----
+true
+
+# Multiple pushed-down filters
+query I
+SELECT (SELECT sum(p.cat) FROM probe p JOIN build b ON ST_Intersects(p.geom, b.geom) WHERE p.id < 15000 AND p.id > 100)
+     IS NOT DISTINCT FROM
+       (SELECT sum(p.cat) FROM probe_noidx p JOIN build b ON ST_Intersects(p.geom, b.geom) WHERE p.id < 15000 AND p.id > 100);
+----
+true

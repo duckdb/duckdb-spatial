@@ -5,13 +5,13 @@ name: Main Extension Distribution Pipeline
 on:
   pull_request:
     branches:
-      - main
+      - v2.0-cyanoptera
     paths-ignore:
       - '**/README.md'
       - 'doc/**'
   push:
     branches:
-      - main
+      - v2.0-cyanoptera
     paths-ignore:
       - '**/README.md'
       - 'doc/**'
@@ -25,10 +25,10 @@ concurrency:
 jobs:
   duckdb-latest-build:
     name: Build extension binaries
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@main
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v2.0-cyanoptera
     with:
-      duckdb_version: main
-      ci_tools_version: main
+      duckdb_version: v2.0-cyanoptera
+      ci_tools_version: v2.0-cyanoptera
       extension_name: spatial
       vcpkg_commit: 84bab45d415d22042bd0b9081aea57f362da3f35
       exclude_archs: 'linux_amd64_musl'
@@ -36,11 +36,11 @@ jobs:
   duckdb-latest-deploy:
     name: Deploy extension binaries
     needs: duckdb-latest-build
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_deploy.yml@main
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_deploy.yml@v2.0-cyanoptera
     secrets: inherit
     with:
-      duckdb_version: main
-      ci_tools_version: main
+      duckdb_version: v2.0-cyanoptera
+      ci_tools_version: v2.0-cyanoptera
       extension_name: spatial
       deploy_latest: ${{ startsWith(github.ref, 'refs/heads/v') || github.ref == 'refs/heads/main' }}
       exclude_archs: 'linux_amd64_musl'

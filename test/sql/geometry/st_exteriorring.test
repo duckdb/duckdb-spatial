@@ -1,3 +1,6 @@
+# name: test/sql/geometry/st_exteriorring.test
+# group: [geometry]
+
 require spatial
 
 foreach TYPE GEOMETRY POLYGON_2D

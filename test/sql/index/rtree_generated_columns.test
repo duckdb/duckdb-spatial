@@ -1,0 +1,74 @@
+# name: test/sql/index/rtree_generated_columns.test
+# group: [index]
+
+# Regression test: the R-tree stores *physical* column ids while scans use *logical* column ids.
+# These diverge when the table has generated columns. The deferred-bounds join scan used to compare
+# them directly, matching the index on geom_b (physical id 1) against probes of geom_a (logical id 1),
+# and then scanned the wrong index, silently dropping all join matches.
+require spatial
+
+statement ok
+SET profiling_renderer_settings = MAP {'operator_casing': 'upper'};
+
+statement ok
+PRAGMA threads=4;
+
+statement ok
+CREATE TABLE t (g AS (1), geom_a GEOMETRY, geom_b GEOMETRY);
+
+statement ok
+INSERT INTO t (geom_a, geom_b)
+SELECT ST_Point(x, y), ST_Point(x + 500, y + 500)
+FROM range(0, 100) r1(x), range(0, 100) r2(y);
+
+statement ok
+CREATE TABLE t_noidx AS SELECT geom_a, geom_b FROM t;
+
+statement ok
+CREATE INDEX t_idx ON t USING RTREE (geom_b);
+
+statement ok
+CREATE TABLE build_a (geom GEOMETRY);
+
+statement ok
+INSERT INTO build_a VALUES (ST_Point(50.5, 50.5));
+
+statement ok
+CREATE TABLE build_b (geom GEOMETRY);
+
+statement ok
+INSERT INTO build_b VALUES (ST_Point(550.5, 550.5));
+
+# Probing geom_a must NOT use the index on geom_b (they share the id 1 in different id spaces)
+query II
+EXPLAIN SELECT count(*) FROM t p JOIN build_a b ON ST_DWithin(p.geom_a, b.geom, 3.0);
+----
+physical_plan	<!REGEX>:.*RTREE_INDEX_SCAN.*
+
+query I
+SELECT count(*) FROM t p JOIN build_a b ON ST_DWithin(p.geom_a, b.geom, 3.0);
+----
+32
+
+query I
+SELECT (SELECT count(*) FROM t p JOIN build_a b ON ST_DWithin(p.geom_a, b.geom, 3.0))
+     = (SELECT count(*) FROM t_noidx p JOIN build_a b ON ST_DWithin(p.geom_a, b.geom, 3.0));
+----
+true
+
+# Probing geom_b (the actually indexed column) must still use the deferred index scan
+query II
+EXPLAIN SELECT count(*) FROM t p JOIN build_b b ON ST_DWithin(p.geom_b, b.geom, 3.0);
+----
+physical_plan	<REGEX>:.*RTREE_INDEX_SCAN.*
+
+query I
+SELECT count(*) FROM t p JOIN build_b b ON ST_DWithin(p.geom_b, b.geom, 3.0);
+----
+32
+
+query I
+SELECT (SELECT count(*) FROM t p JOIN build_b b ON ST_DWithin(p.geom_b, b.geom, 3.0))
+     = (SELECT count(*) FROM t_noidx p JOIN build_b b ON ST_DWithin(p.geom_b, b.geom, 3.0));
+----
+true

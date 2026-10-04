@@ -16,6 +16,7 @@ class GeosGeometry {
 public:
 	// constructor
 	GeosGeometry(GEOSContextHandle_t handle_p, GEOSGeometry *geom_p);
+	GeosGeometry(GEOSContextHandle_t handle_p, double xmin, double ymin, double xmax, double ymax);
 
 	// disable copy
 	GeosGeometry(const GeosGeometry &) = delete;
@@ -41,6 +42,7 @@ public:
 	bool is_valid() const;
 	bool is_empty() const;
 
+	GeosGeometry get_clone() const;
 	GeosGeometry get_boundary() const;
 	GeosGeometry get_centroid() const;
 	GeosGeometry get_convex_hull() const;
@@ -48,7 +50,7 @@ public:
 	GeosGeometry get_minimum_rotated_rectangle() const;
 	GeosGeometry get_reversed() const;
 	GeosGeometry get_point_on_surface() const;
-	GeosGeometry get_made_valid() const;
+	GeosGeometry get_made_valid(GEOSMakeValidMethods method, bool keepCollapsed) const;
 	GeosGeometry get_voronoi_diagram() const;
 	GeosGeometry get_built_area() const;
 	GeosGeometry get_noded() const;
@@ -81,6 +83,7 @@ public:
 	GeosGeometry get_intersection(const GeosGeometry &other) const;
 	GeosGeometry get_union(const GeosGeometry &other) const;
 	GeosGeometry get_shortest_line(const GeosGeometry &other) const;
+	GeosGeometry get_snap(const GeosGeometry &other, double tolerance) const;
 
 	GeosGeometry get_simplified(double tolerance) const;
 	GeosGeometry get_simplified_topo(double tolerance) const;
@@ -90,6 +93,7 @@ public:
 	// default tolerance is max(height/width) / 1000
 	GeosGeometry get_maximum_inscribed_circle() const;
 	GeosGeometry get_point_n(int n) const;
+	GeosGeometry get_geometry_n(int n) const;
 
 	GeosGeometry get_linemerged(bool directed) const;
 	GeosGeometry get_concave_hull(const double ratio, const bool allowHoles) const;
@@ -107,6 +111,13 @@ public:
 	void get_extent(double &xmin, double &ymin, double &xmax, double &ymax) const {
 		GEOSGeom_getExtent_r(handle, geom, &xmin, &ymin, &xmax, &ymax);
 	}
+	size_t get_dimension() const {
+		return GEOSGeom_getDimensions_r(handle, geom);
+	}
+	size_t get_num_geometries() const {
+		return GEOSGetNumGeometries_r(handle, geom);
+	}
+	size_t get_num_vertices() const;
 
 private:
 	GEOSContextHandle_t handle;
@@ -210,6 +221,9 @@ private:
 //-- GeosGeometry --//
 inline GeosGeometry::GeosGeometry(GEOSContextHandle_t handle_p, GEOSGeometry *geom_p) : handle(handle_p), geom(geom_p) {
 }
+inline GeosGeometry::GeosGeometry(GEOSContextHandle_t handle_p, double xmin, double ymin, double xmax, double ymax)
+    : handle(handle_p), geom(GEOSGeom_createRectangle_r(handle_p, xmin, ymin, xmax, ymax)) {
+}
 inline GeosGeometry::GeosGeometry(GeosGeometry &&other) noexcept : handle(other.handle), geom(other.geom) {
 	other.geom = nullptr;
 	other.handle = nullptr;
@@ -298,6 +312,10 @@ inline bool GeosGeometry::is_empty() const {
 	return GEOSisEmpty_r(handle, geom);
 }
 
+inline GeosGeometry GeosGeometry::get_clone() const {
+	return GeosGeometry(handle, GEOSGeom_clone_r(handle, geom));
+}
+
 inline GeosGeometry GeosGeometry::get_boundary() const {
 	return GeosGeometry(handle, GEOSBoundary_r(handle, geom));
 }
@@ -326,8 +344,32 @@ inline GeosGeometry GeosGeometry::get_point_on_surface() const {
 	return GeosGeometry(handle, GEOSPointOnSurface_r(handle, geom));
 }
 
-inline GeosGeometry GeosGeometry::get_made_valid() const {
-	return GeosGeometry(handle, GEOSMakeValid_r(handle, geom));
+inline GeosGeometry GeosGeometry::get_made_valid(GEOSMakeValidMethods method, bool keepCollapsed) const {
+	auto *params_raw = GEOSMakeValidParams_create_r(handle);
+	if (!params_raw) {
+		return GeosGeometry(handle, nullptr);
+	}
+
+	struct ParamsDeleter {
+		GEOSContextHandle_t h;
+		void operator()(GEOSMakeValidParams *p) const {
+			if (p) {
+				GEOSMakeValidParams_destroy_r(h, p);
+			}
+		}
+	};
+
+	unique_ptr<GEOSMakeValidParams, ParamsDeleter> params(params_raw, ParamsDeleter {handle});
+
+	if (!GEOSMakeValidParams_setMethod_r(handle, params.get(), method)) {
+		return GeosGeometry(handle, nullptr);
+	}
+
+	if (!GEOSMakeValidParams_setKeepCollapsed_r(handle, params.get(), keepCollapsed)) {
+		return GeosGeometry(handle, nullptr);
+	}
+
+	return GeosGeometry(handle, GEOSMakeValidWithParams_r(handle, geom, params.get()));
 }
 
 inline GeosGeometry GeosGeometry::get_minimum_rotated_rectangle() const {
@@ -397,6 +439,13 @@ inline GeosGeometry GeosGeometry::get_maximum_inscribed_circle(double tolerance)
 inline GeosGeometry GeosGeometry::get_point_n(int n) const {
 	const auto point = GEOSGeomGetPointN_r(handle, geom, n);
 	return GeosGeometry(handle, point);
+}
+
+inline GeosGeometry GeosGeometry::get_geometry_n(int n) const {
+	// TODO: GEOSGeometryN_r returns a pointer into the internal storage
+	//		 of geom, so we need to return a copy if we want to keep the interface of GeosGeometry the same
+	auto subgeom = GEOSGetGeometryN_r(handle, geom, n);
+	return GeosGeometry(handle, GEOSGeom_clone_r(handle, subgeom));
 }
 
 inline bool GeosGeometry::contains(const GeosGeometry &other) const {
@@ -475,6 +524,10 @@ inline GeosGeometry GeosGeometry::get_shortest_line(const GeosGeometry &other) c
 	return GeosGeometry(handle, line_geom);
 }
 
+inline GeosGeometry GeosGeometry::get_snap(const GeosGeometry &other, double tolerance) const {
+	return GeosGeometry(handle, GEOSSnap_r(handle, geom, other.geom, tolerance));
+}
+
 inline GeosGeometry GeosGeometry::get_simplified(double tolerance) const {
 	return GeosGeometry(handle, GEOSSimplify_r(handle, geom, tolerance));
 }
@@ -527,7 +580,7 @@ inline GeosGeometry GeosGeometry::get_coverage_clean(double snapping_distance, d
 		}
 	};
 
-	unique_ptr<GEOSCoverageCleanParams, ParamsDeleter> params(params_raw, ParamsDeleter{handle});
+	unique_ptr<GEOSCoverageCleanParams, ParamsDeleter> params(params_raw, ParamsDeleter {handle});
 
 	// Conditionally set optional parameters; check return codes and fail fast
 	if (snapping_distance >= 0) {
@@ -566,6 +619,70 @@ inline GeosGeometry GeosGeometry::get_coverage_union() const {
 
 inline PreparedGeosGeometry GeosGeometry::get_prepared() const {
 	return PreparedGeosGeometry(handle, *this);
+}
+
+static size_t get_num_vertices_geos(GEOSContextHandle_t handle, const GEOSGeometry *geom) {
+	size_t num_vertices = 0;
+
+	if (GEOSisEmpty_r(handle, geom)) {
+		return num_vertices;
+	}
+
+	switch (GEOSGeomTypeId_r(handle, geom)) {
+	case GEOS_POINT: {
+		num_vertices = 1;
+		break;
+	};
+	case GEOS_LINESTRING:
+	case GEOS_LINEARRING: {
+		const int line_vertecies = GEOSGeomGetNumPoints_r(handle, geom);
+		if (line_vertecies == -1) {
+			throw InvalidInputException("Could not get number of points for LineString or LinearRing input");
+		}
+
+		num_vertices = static_cast<size_t>(line_vertecies);
+		break;
+	}
+	case GEOS_POLYGON: {
+		const int exterior_ring_vertecies = GEOSGeomGetNumPoints_r(handle, GEOSGetExteriorRing_r(handle, geom));
+		if (exterior_ring_vertecies == -1) {
+			throw InvalidInputException("Could not get number of points for polygon exterior ring");
+		}
+		num_vertices += static_cast<size_t>(exterior_ring_vertecies);
+
+		for (size_t i = 0; i < GEOSGetNumInteriorRings_r(handle, geom); i++) {
+			const int interior_ring_vertecies = GEOSGeomGetNumPoints_r(handle, GEOSGetInteriorRingN_r(handle, geom, i));
+			if (interior_ring_vertecies == -1) {
+				throw InvalidInputException("Could not get number of points for polygon interior ring %d", i);
+			}
+			num_vertices += static_cast<size_t>(interior_ring_vertecies);
+		}
+		break;
+	}
+	case GEOS_MULTIPOINT: {
+		// For a MultiPoint, no need to check nested geometries as there are none..
+		num_vertices = GEOSGetNumGeometries_r(handle, geom);
+		break;
+	}
+	case GEOS_MULTILINESTRING:
+	case GEOS_MULTIPOLYGON:
+	case GEOS_GEOMETRYCOLLECTION: {
+		for (size_t i = 0; i < GEOSGetNumGeometries_r(handle, geom); i++) {
+			num_vertices += get_num_vertices_geos(handle, GEOSGetGeometryN_r(handle, geom, i));
+		}
+		break;
+	}
+	default: {
+		throw InvalidInputException("Geometry type not implemented for get_num_vertices: %d",
+		                            GEOSGeomTypeId_r(handle, geom));
+	}
+	}
+
+	return num_vertices;
+}
+
+inline size_t GeosGeometry::get_num_vertices() const {
+    return get_num_vertices_geos(handle, geom);
 }
 
 //-- PreparedGeosGeometry --//

@@ -1,0 +1,71 @@
+# name: test/sql/join/spatial_join_null_build.test
+# group: [join]
+
+# Regression test: a spatial join whose build side contains only NULL and/or EMPTY geometries used to
+# segfault: the join R-tree was sized by the non-null non-empty count (0), which skipped allocating its
+# arrays, but Build() still unconditionally wrote the root node into the null array. Build() now
+# handles a tree with zero pushed items (the probe side already guards on Count() == 0).
+require spatial
+
+statement ok
+PRAGMA threads=4;
+
+statement ok
+CREATE TABLE probe AS SELECT ST_Point(x, y) AS geom FROM range(0, 10) r1(x), range(0, 10) r2(y);
+
+statement ok
+CREATE TABLE build_null (geom GEOMETRY);
+
+statement ok
+INSERT INTO build_null VALUES (NULL);
+
+# NULL-only build side
+query I
+SELECT count(*) FROM probe p JOIN build_null b ON ST_Intersects(p.geom, b.geom);
+----
+0
+
+statement ok
+INSERT INTO build_null VALUES ('POINT EMPTY'), ('GEOMETRYCOLLECTION EMPTY');
+
+# NULL + EMPTY build side
+query I
+SELECT count(*) FROM probe p JOIN build_null b ON ST_Intersects(p.geom, b.geom);
+----
+0
+
+query I
+SELECT count(*) FROM probe p JOIN build_null b ON ST_DWithin(p.geom, b.geom, 1.0);
+----
+0
+
+# Outer joins must still emit the unmatched rows of either side
+query I
+SELECT count(*) FROM probe p LEFT JOIN build_null b ON ST_Intersects(p.geom, b.geom);
+----
+100
+
+query I
+SELECT count(*) FROM probe p RIGHT JOIN build_null b ON ST_Intersects(p.geom, b.geom);
+----
+3
+
+query I
+SELECT count(*) FROM probe p FULL JOIN build_null b ON ST_Intersects(p.geom, b.geom);
+----
+103
+
+# Also with an R-tree index on the probe side (exercises the deferred-bounds scan fallback
+# when no filter is pushed because the join tree is empty)
+statement ok
+CREATE INDEX probe_idx ON probe USING RTREE (geom);
+
+query I
+SELECT count(*) FROM probe p JOIN build_null b ON ST_Intersects(p.geom, b.geom);
+----
+0
+
+query I
+SELECT count(*) FROM probe p LEFT JOIN build_null b ON ST_Intersects(p.geom, b.geom);
+----
+100

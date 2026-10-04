@@ -1,6 +1,7 @@
 #include "sgl.hpp"
 
 #include <cassert>
+#include <cmath>
 #include <cstdio>
 
 namespace sgl {
@@ -816,6 +817,477 @@ void test_misc_coverage() {
 	assert(geom.get_vertex_array() != nullptr);
 }
 
+void test_linear_referencing() {
+	sgl::arena_allocator alloc;
+	sgl::wkt_reader reader(alloc);
+
+	// 1. linestring::interpolate on zero-length line
+	{
+		sgl::geometry geom;
+		assert(reader.try_parse(geom, "LINESTRING(5 5, 5 5)"));
+		sgl::vertex_xyzm pt = {};
+		assert(sgl::linestring::interpolate(geom, 0.5, pt));
+		assert(pt.x == 5.0 && pt.y == 5.0);
+		assert(!std::isnan(pt.x) && !std::isnan(pt.y));
+	}
+
+	// 2. linestring::interpolate_points on zero-length line (must not hang / infinite loop)
+	{
+		sgl::geometry geom;
+		assert(reader.try_parse(geom, "LINESTRING(5 5, 5 5)"));
+		sgl::geometry result;
+		sgl::linestring::interpolate_points(alloc, geom, 0.2, result);
+		assert(result.get_type() == sgl::geometry_type::POINT);
+		assert(result.get_vertex_count() == 1);
+		auto pt = result.get_vertex_xy(0);
+		assert(pt.x == 5.0 && pt.y == 5.0);
+		assert(!std::isnan(pt.x) && !std::isnan(pt.y));
+	}
+
+	// 3. linestring::substring on leading duplicate vertices
+	{
+		sgl::geometry geom;
+		assert(reader.try_parse(geom, "LINESTRING(1 1, 1 1, 2 2)"));
+		sgl::geometry result;
+		sgl::linestring::substring(alloc, geom, 0.0, 0.5, result);
+		assert(result.get_type() == sgl::geometry_type::LINESTRING);
+		assert(result.get_vertex_count() == 3);
+		for (size_t i = 0; i < result.get_vertex_count(); i++) {
+			auto pt = result.get_vertex_xy(i);
+			assert(!std::isnan(pt.x) && !std::isnan(pt.y));
+		}
+		auto pt0 = result.get_vertex_xy(0);
+		auto pt1 = result.get_vertex_xy(1);
+		auto pt2 = result.get_vertex_xy(2);
+		assert(pt0.x == 1.0 && pt0.y == 1.0);
+		assert(pt1.x == 1.0 && pt1.y == 1.0);
+		assert(pt2.x == 1.5 && pt2.y == 1.5);
+	}
+
+	// 4. linestring::substring on collapsed zero-length line (beg_frac != end_frac)
+	{
+		sgl::geometry geom;
+		assert(reader.try_parse(geom, "LINESTRING(5 5, 5 5)"));
+		sgl::geometry result;
+		sgl::linestring::substring(alloc, geom, 0.2, 0.8, result);
+		assert(result.get_type() == sgl::geometry_type::LINESTRING);
+		assert(result.get_vertex_count() == 2);
+		auto pt0 = result.get_vertex_xy(0);
+		auto pt1 = result.get_vertex_xy(1);
+		assert(pt0.x == 5.0 && pt0.y == 5.0);
+		assert(pt1.x == 5.0 && pt1.y == 5.0);
+		assert(!std::isnan(pt0.x) && !std::isnan(pt0.y));
+		assert(!std::isnan(pt1.x) && !std::isnan(pt1.y));
+	}
+
+	// 5. linestring::substring on collapsed zero-length line (beg_frac == end_frac)
+	{
+		sgl::geometry geom;
+		assert(reader.try_parse(geom, "LINESTRING(5 5, 5 5)"));
+		sgl::geometry result;
+		sgl::linestring::substring(alloc, geom, 0.5, 0.5, result);
+		assert(result.get_type() == sgl::geometry_type::POINT);
+		assert(result.get_vertex_count() == 1);
+		auto pt0 = result.get_vertex_xy(0);
+		assert(pt0.x == 5.0 && pt0.y == 5.0);
+		assert(!std::isnan(pt0.x) && !std::isnan(pt0.y));
+	}
+
+	// 6. linestring::substring on single-vertex linestring (beg_frac != end_frac)
+	{
+		sgl::geometry geom;
+		assert(reader.try_parse(geom, "LINESTRING(0 0)"));
+		sgl::geometry result;
+		sgl::linestring::substring(alloc, geom, 0.25, 0.75, result);
+		assert(result.get_type() == sgl::geometry_type::LINESTRING);
+		assert(result.get_vertex_count() == 2);
+		auto pt0 = result.get_vertex_xy(0);
+		auto pt1 = result.get_vertex_xy(1);
+		assert(pt0.x == 0.0 && pt0.y == 0.0);
+		assert(pt1.x == 0.0 && pt1.y == 0.0);
+		assert(!std::isnan(pt0.x) && !std::isnan(pt0.y));
+		assert(!std::isnan(pt1.x) && !std::isnan(pt1.y));
+	}
+
+	// 7. linestring::substring on single-vertex linestring (0.0, 1.0)
+	{
+		sgl::geometry geom;
+		assert(reader.try_parse(geom, "LINESTRING(0 0)"));
+		sgl::geometry result;
+		sgl::linestring::substring(alloc, geom, 0.0, 1.0, result);
+		assert(result.get_type() == sgl::geometry_type::LINESTRING);
+		assert(result.get_vertex_count() == 2);
+		auto pt0 = result.get_vertex_xy(0);
+		auto pt1 = result.get_vertex_xy(1);
+		assert(pt0.x == 0.0 && pt0.y == 0.0);
+		assert(pt1.x == 0.0 && pt1.y == 0.0);
+		assert(!std::isnan(pt0.x) && !std::isnan(pt0.y));
+		assert(!std::isnan(pt1.x) && !std::isnan(pt1.y));
+	}
+}
+
+void test_linear_referencing_adversarial() {
+	sgl::arena_allocator alloc;
+	sgl::wkt_reader reader(alloc);
+
+	const double qnan = std::numeric_limits<double>::quiet_NaN();
+	const double inf = std::numeric_limits<double>::infinity();
+
+	// =========================================================================
+	// Category 1: Coordinate dimensions (Z, M, ZM)
+	// =========================================================================
+	{
+		// LINESTRING Z with leading zero-length segment
+		sgl::geometry geom_z;
+		assert(reader.try_parse(geom_z, "LINESTRING Z (0 0 10, 0 0 10, 10 0 20)"));
+		assert(geom_z.has_z());
+		assert(!geom_z.has_m());
+
+		// interpolate at 0.0, 0.5, 1.0
+		sgl::vertex_xyzm pt = {};
+		assert(sgl::linestring::interpolate(geom_z, 0.0, pt));
+		assert(pt.x == 0.0 && pt.y == 0.0 && pt.z == 10.0);
+
+		assert(sgl::linestring::interpolate(geom_z, 0.5, pt));
+		assert(pt.x == 5.0 && pt.y == 0.0 && pt.z == 15.0);
+
+		assert(sgl::linestring::interpolate(geom_z, 1.0, pt));
+		assert(pt.x == 10.0 && pt.y == 0.0 && pt.z == 20.0);
+
+		// interpolate_points
+		sgl::geometry pts_z;
+		sgl::linestring::interpolate_points(alloc, geom_z, 0.5, pts_z);
+		assert(pts_z.get_type() == sgl::geometry_type::MULTI_POINT);
+		assert(pts_z.has_z());
+		assert(pts_z.get_part_count() == 2);
+		const auto *part1 = pts_z.get_first_part();
+		auto v1 = part1->get_vertex_xyzm(0);
+		assert(v1.x == 5.0 && v1.y == 0.0 && v1.z == 15.0);
+		const auto *part2 = part1->get_next();
+		auto v2 = part2->get_vertex_xyzm(0);
+		assert(v2.x == 10.0 && v2.y == 0.0 && v2.z == 20.0);
+
+		// substring
+		sgl::geometry sub_z;
+		sgl::linestring::substring(alloc, geom_z, 0.0, 0.5, sub_z);
+		assert(sub_z.get_type() == sgl::geometry_type::LINESTRING);
+		assert(sub_z.has_z());
+		assert(sub_z.get_vertex_count() == 3);
+		auto sv0 = sub_z.get_vertex_xyzm(0);
+		auto sv1 = sub_z.get_vertex_xyzm(1);
+		auto sv2 = sub_z.get_vertex_xyzm(2);
+		assert(sv0.x == 0.0 && sv0.y == 0.0 && sv0.z == 10.0);
+		assert(sv1.x == 0.0 && sv1.y == 0.0 && sv1.z == 10.0);
+		assert(sv2.x == 5.0 && sv2.y == 0.0 && sv2.z == 15.0);
+	}
+
+	{
+		// LINESTRING ZM with middle zero-length segment
+		sgl::geometry geom_zm;
+		assert(reader.try_parse(geom_zm, "LINESTRING ZM (0 0 10 100, 10 0 20 200, 10 0 20 200, 20 0 30 300)"));
+		assert(geom_zm.has_z());
+		assert(geom_zm.has_m());
+
+		sgl::vertex_xyzm pt = {};
+		assert(sgl::linestring::interpolate(geom_zm, 0.25, pt));
+		assert(pt.x == 5.0 && pt.y == 0.0 && pt.z == 15.0 && pt.m == 150.0);
+
+		assert(sgl::linestring::interpolate(geom_zm, 0.5, pt));
+		assert(pt.x == 10.0 && pt.y == 0.0 && pt.z == 20.0 && pt.m == 200.0);
+
+		sgl::geometry sub_zm;
+		sgl::linestring::substring(alloc, geom_zm, 0.25, 0.75, sub_zm);
+		assert(sub_zm.get_type() == sgl::geometry_type::LINESTRING);
+		assert(sub_zm.has_z());
+		assert(sub_zm.has_m());
+		auto v_beg = sub_zm.get_vertex_xyzm(0);
+		assert(v_beg.x == 5.0 && v_beg.y == 0.0 && v_beg.z == 15.0 && v_beg.m == 150.0);
+		auto v_end = sub_zm.get_vertex_xyzm(sub_zm.get_vertex_count() - 1);
+		assert(v_end.x == 15.0 && v_end.y == 0.0 && v_end.z == 25.0 && v_end.m == 250.0);
+	}
+
+	{
+		// LINESTRING M
+		sgl::geometry geom_m;
+		assert(reader.try_parse(geom_m, "LINESTRING M (0 0 100, 0 0 100, 10 0 200)"));
+		assert(!geom_m.has_z());
+		assert(geom_m.has_m());
+
+		sgl::vertex_xyzm pt = {};
+		assert(sgl::linestring::interpolate(geom_m, 0.5, pt));
+		// In SGL layout for M without Z, vertex_width is 24 bytes (x, y, m).
+		// When copied into vertex_xyzm, m sits at pt.z offset.
+		assert(pt.x == 5.0 && pt.y == 0.0 && pt.z == 150.0);
+
+		sgl::geometry sub_m;
+		sgl::linestring::substring(alloc, geom_m, 0.0, 0.5, sub_m);
+		assert(sub_m.get_type() == sgl::geometry_type::LINESTRING);
+		assert(sub_m.has_m());
+		assert(!sub_m.has_z());
+		auto mv0 = sub_m.get_vertex_xyzm(0);
+		auto mv1 = sub_m.get_vertex_xyzm(1);
+		auto mv2 = sub_m.get_vertex_xyzm(2);
+		assert(mv0.x == 0.0 && mv0.z == 100.0);
+		assert(mv1.x == 0.0 && mv1.z == 100.0);
+		assert(mv2.x == 5.0 && mv2.z == 150.0);
+	}
+
+	// =========================================================================
+	// Category 2: Extreme inputs (NaN, Inf, negatives, order, precision)
+	// =========================================================================
+	{
+		sgl::geometry geom;
+		assert(reader.try_parse(geom, "LINESTRING(10 10, 20 20)"));
+
+		// beg_frac > end_frac
+		{
+			sgl::geometry result;
+			sgl::linestring::substring(alloc, geom, 0.8, 0.2, result);
+			assert(result.is_empty());
+		}
+
+		// NaN inputs in substring must return empty, not corrupted geometry with (0, 0)
+		{
+			sgl::geometry r_nan_beg;
+			sgl::linestring::substring(alloc, geom, qnan, 0.5, r_nan_beg);
+			assert(r_nan_beg.is_empty());
+
+			sgl::geometry r_nan_end;
+			sgl::linestring::substring(alloc, geom, 0.5, qnan, r_nan_end);
+			assert(r_nan_end.is_empty());
+
+			sgl::geometry r_nan_both;
+			sgl::linestring::substring(alloc, geom, qnan, qnan, r_nan_both);
+			assert(r_nan_both.is_empty());
+		}
+
+		// NaN in interpolate must return false
+		{
+			sgl::vertex_xyzm pt = {};
+			bool ret = sgl::linestring::interpolate(geom, qnan, pt);
+			assert(!ret);
+		}
+
+		// NaN in interpolate_points must return empty POINT
+		{
+			sgl::geometry pts_res;
+			sgl::linestring::interpolate_points(alloc, geom, qnan, pts_res);
+			assert(pts_res.get_type() == sgl::geometry_type::POINT);
+			assert(pts_res.is_empty());
+		}
+
+		// Very small frac / actual_length underflow test in interpolate_points (must not hang)
+		{
+			sgl::geometry tiny_geom;
+			assert(reader.try_parse(tiny_geom, "LINESTRING(0 0, 1e-200 0)"));
+			sgl::geometry result;
+			sgl::linestring::interpolate_points(alloc, tiny_geom, 1e-200, result);
+			assert(result.get_type() == sgl::geometry_type::POINT);
+		}
+
+		// -0.0
+		{
+			sgl::vertex_xyzm pt = {};
+			assert(sgl::linestring::interpolate(geom, -0.0, pt));
+			assert(pt.x == 10.0 && pt.y == 10.0);
+
+			sgl::geometry result;
+			sgl::linestring::substring(alloc, geom, -0.0, 0.5, result);
+			assert(result.get_type() == sgl::geometry_type::LINESTRING);
+			assert(result.get_vertex_count() == 2);
+			auto p0 = result.get_vertex_xy(0);
+			assert(p0.x == 10.0 && p0.y == 10.0);
+		}
+
+		// negative numbers clamp to 0
+		{
+			sgl::vertex_xyzm pt = {};
+			assert(sgl::linestring::interpolate(geom, -5.0, pt));
+			assert(pt.x == 10.0 && pt.y == 10.0);
+
+			sgl::geometry result;
+			sgl::linestring::substring(alloc, geom, -2.0, 0.5, result);
+			assert(result.get_type() == sgl::geometry_type::LINESTRING);
+			auto p0 = result.get_vertex_xy(0);
+			assert(p0.x == 10.0 && p0.y == 10.0);
+		}
+
+		// numbers > 1.0 clamp to 1
+		{
+			sgl::vertex_xyzm pt = {};
+			assert(sgl::linestring::interpolate(geom, 2.5, pt));
+			assert(pt.x == 20.0 && pt.y == 20.0);
+
+			sgl::geometry result;
+			sgl::linestring::substring(alloc, geom, 0.5, 3.0, result);
+			assert(result.get_type() == sgl::geometry_type::LINESTRING);
+			auto p1 = result.get_vertex_xy(result.get_vertex_count() - 1);
+			assert(p1.x == 20.0 && p1.y == 20.0);
+		}
+
+		// Inf and -Inf
+		{
+			sgl::vertex_xyzm pt = {};
+			assert(sgl::linestring::interpolate(geom, inf, pt));
+			assert(pt.x == 20.0 && pt.y == 20.0);
+
+			assert(sgl::linestring::interpolate(geom, -inf, pt));
+			assert(pt.x == 10.0 && pt.y == 10.0);
+
+			sgl::geometry result;
+			sgl::linestring::substring(alloc, geom, -inf, inf, result);
+			assert(result.get_type() == sgl::geometry_type::LINESTRING);
+			assert(result.get_vertex_count() == 2);
+		}
+
+		// beg_frac == end_frac at 0.0, 0.5, 1.0
+		{
+			sgl::geometry r0, r5, r1;
+			sgl::linestring::substring(alloc, geom, 0.0, 0.0, r0);
+			assert(r0.get_type() == sgl::geometry_type::POINT);
+			assert(r0.get_vertex_xy(0).x == 10.0);
+
+			sgl::linestring::substring(alloc, geom, 0.5, 0.5, r5);
+			assert(r5.get_type() == sgl::geometry_type::POINT);
+			assert(r5.get_vertex_xy(0).x == 15.0);
+
+			sgl::linestring::substring(alloc, geom, 1.0, 1.0, r1);
+			assert(r1.get_type() == sgl::geometry_type::POINT);
+			assert(r1.get_vertex_xy(0).x == 20.0);
+		}
+
+		// Floating point precision very close to 1.0 (e.g. 0.999999999999999)
+		{
+			sgl::geometry result;
+			sgl::linestring::substring(alloc, geom, 0.0, 0.999999999999999, result);
+			assert(result.get_type() == sgl::geometry_type::LINESTRING);
+			assert(result.get_vertex_count() == 2);
+			auto pend = result.get_vertex_xy(1);
+			assert(pend.x > 19.999 && pend.x <= 20.0);
+		}
+	}
+
+	// =========================================================================
+	// Category 3: Fully degenerate linestrings (2, 3, 10 vertices)
+	// =========================================================================
+	{
+		sgl::geometry geom2, geom3, geom10;
+		assert(reader.try_parse(geom2, "LINESTRING(0 0, 0 0)"));
+		assert(reader.try_parse(geom3, "LINESTRING(0 0, 0 0, 0 0)"));
+		assert(reader.try_parse(geom10, "LINESTRING(0 0, 0 0, 0 0, 0 0, 0 0, 0 0, 0 0, 0 0, 0 0, 0 0)"));
+
+		sgl::vertex_xyzm pt = {};
+		assert(sgl::linestring::interpolate(geom10, 0.5, pt));
+		assert(pt.x == 0.0 && pt.y == 0.0);
+
+		sgl::geometry pts_res;
+		sgl::linestring::interpolate_points(alloc, geom10, 0.3, pts_res);
+		assert(pts_res.get_type() == sgl::geometry_type::POINT);
+		assert(pts_res.get_vertex_count() == 1);
+
+		sgl::geometry sub_pt;
+		sgl::linestring::substring(alloc, geom10, 0.5, 0.5, sub_pt);
+		assert(sub_pt.get_type() == sgl::geometry_type::POINT);
+		assert(sub_pt.get_vertex_count() == 1);
+
+		sgl::geometry sub_line;
+		sgl::linestring::substring(alloc, geom10, 0.2, 0.8, sub_line);
+		assert(sub_line.get_type() == sgl::geometry_type::LINESTRING);
+		assert(sub_line.get_vertex_count() == 10);
+	}
+
+	// =========================================================================
+	// Category 4: Mixed duplicate vertices & spanning degenerate middle
+	// =========================================================================
+	{
+		sgl::geometry geom;
+		assert(reader.try_parse(geom, "LINESTRING(0 0, 0 0, 5 5, 5 5, 10 10, 10 10)"));
+		assert(geom.get_vertex_count() == 6);
+
+		sgl::geometry r_mid;
+		// spanning exactly across the degenerate middle segment
+		sgl::linestring::substring(alloc, geom, 0.49, 0.51, r_mid);
+		assert(r_mid.get_type() == sgl::geometry_type::LINESTRING);
+		assert(r_mid.get_vertex_count() >= 2);
+		for (size_t i = 0; i < r_mid.get_vertex_count(); i++) {
+			auto p = r_mid.get_vertex_xy(i);
+			assert(!std::isnan(p.x) && !std::isnan(p.y));
+		}
+
+		sgl::geometry r_half;
+		sgl::linestring::substring(alloc, geom, 0.5, 1.0, r_half);
+		assert(r_half.get_type() == sgl::geometry_type::LINESTRING);
+		assert(r_half.get_vertex_count() >= 2);
+	}
+
+	// =========================================================================
+	// Category 5: Multi-point looping on interpolate_points
+	// =========================================================================
+	{
+		sgl::geometry geom;
+		assert(reader.try_parse(geom, "LINESTRING(0 0, 10 0)"));
+		sgl::geometry mp;
+		// Fraction 0.1 -> 10 points along the segment
+		sgl::linestring::interpolate_points(alloc, geom, 0.1, mp);
+		assert(mp.get_type() == sgl::geometry_type::MULTI_POINT);
+		assert(mp.get_part_count() == 10);
+	}
+}
+
+void test_wkb_parsing() {
+	sgl::arena_allocator alloc;
+	sgl::wkb_reader reader(alloc);
+
+	const char point_wkb[] = {1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+	char concatenated_wkb[sizeof(point_wkb) * 2];
+	memcpy(concatenated_wkb, point_wkb, sizeof(point_wkb));
+	memcpy(concatenated_wkb + sizeof(point_wkb), point_wkb, sizeof(point_wkb));
+
+	sgl::geometry geom;
+	assert(reader.try_parse(geom, point_wkb, sizeof(point_wkb)));
+	assert(!reader.try_parse(geom, concatenated_wkb, sizeof(concatenated_wkb)));
+	assert(reader.get_error() == sgl::wkb_reader_error::TRAILING_DATA);
+	assert(strcmp(reader.get_error_message(), "Unexpected trailing data after WKB geometry") == 0);
+	assert(reader.try_parse(geom, point_wkb, sizeof(point_wkb)));
+
+	sgl::extent_xy extent;
+	size_t vertex_count;
+	assert(reader.try_parse_stats(extent, vertex_count, point_wkb, sizeof(point_wkb)));
+	assert(!reader.try_parse_stats(extent, vertex_count, concatenated_wkb, sizeof(concatenated_wkb)));
+	assert(reader.get_error() == sgl::wkb_reader_error::TRAILING_DATA);
+	assert(reader.try_parse_stats(extent, vertex_count, point_wkb, sizeof(point_wkb)));
+}
+
+void test_wkb_reader_dimension_state() {
+	sgl::arena_allocator alloc;
+	sgl::wkb_reader reader(alloc);
+	reader.set_allow_mixed_zm(true);
+
+	const unsigned char mixed_wkb[] = {
+	    0x01, 0x07, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01, 0xE9, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00,
+	    0x00, 0x00, 0x00, 0xF0, 0x3F, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00,
+	    0x00, 0x00, 0x08, 0x40, 0x01, 0xD1, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x40,
+	    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x14, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x40,
+	};
+	const char point_wkb[] = {1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+
+	sgl::geometry geom;
+	assert(reader.try_parse(geom, reinterpret_cast<const char *>(mixed_wkb), sizeof(mixed_wkb)));
+	assert(reader.parsed_mixed_zm());
+	assert(reader.parsed_any_z());
+	assert(reader.parsed_any_m());
+
+	assert(reader.try_parse(geom, point_wkb, sizeof(point_wkb)));
+	assert(!reader.parsed_mixed_zm());
+	assert(!reader.parsed_any_z());
+	assert(!reader.parsed_any_m());
+
+	sgl::extent_xy extent;
+	size_t vertex_count;
+	assert(reader.try_parse_stats(extent, vertex_count, point_wkb, sizeof(point_wkb)));
+	assert(!reader.parsed_mixed_zm());
+}
+
 int main() {
 
 	test_allocator();
@@ -832,6 +1304,10 @@ int main() {
 	test_prepared_geometry();
 
 	test_misc_coverage();
+	test_linear_referencing();
+	test_linear_referencing_adversarial();
+	test_wkb_reader_dimension_state();
+	test_wkb_parsing();
 
 	printf("All tests passed!\n");
 	return 0;

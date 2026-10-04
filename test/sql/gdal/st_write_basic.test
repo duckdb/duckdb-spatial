@@ -1,3 +1,6 @@
+# name: test/sql/gdal/st_write_basic.test
+# group: [gdal]
+
 require spatial
 
 statement ok

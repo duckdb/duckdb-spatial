@@ -1,3 +1,6 @@
+# name: test/sql/index/rtree_transaction.test
+# group: [index]
+
 require spatial
 
 statement ok

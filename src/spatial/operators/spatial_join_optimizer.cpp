@@ -8,9 +8,15 @@
 #include "duckdb/planner/operator/logical_any_join.hpp"
 #include "duckdb/catalog/catalog_entry/scalar_function_catalog_entry.hpp"
 #include "duckdb/optimizer/optimizer_extension.hpp"
+#include "duckdb/optimizer/join_filter_pushdown_optimizer.hpp"
+#include "duckdb/execution/operator/join/join_filter_pushdown.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
+#include "duckdb/planner/expression/bound_columnref_expression.hpp"
+#include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/operator/logical_filter.hpp"
+#include "duckdb/planner/operator/logical_get.hpp"
+#include "duckdb/planner/table_filter.hpp"
 
 namespace duckdb {
 
@@ -94,9 +100,15 @@ static bool IsSpatialJoinPredicate(const unique_ptr<Expression> &expr, const uno
 
 	auto &func = expr->Cast<BoundFunctionExpression>();
 
-	// The function must be a binary predicate
-	if (func.GetChildren().size() != 2) {
+	// The function must be a binary predicate over its first two children.
+	// Any further children (e.g. the ST_DWithin distance) must be constant, as only the first two are rebound.
+	if (func.GetChildren().size() < 2) {
 		return false;
+	}
+	for (idx_t i = 2; i < func.GetChildren().size(); i++) {
+		if (!func.GetChildren()[i]->IsFoldable()) {
+			return false;
+		}
 	}
 
 	// The function must return a boolean
@@ -106,6 +118,12 @@ static bool IsSpatialJoinPredicate(const unique_ptr<Expression> &expr, const uno
 
 	// The function must be a recognized spatial predicate
 	if (spatial_predicate_map.count(func.Function().GetName().GetIdentifierName()) == 0) {
+		return false;
+	}
+
+	// The function's operands must be GEOMETRY
+	if (func.GetChildren()[0]->GetReturnType().id() != LogicalTypeId::GEOMETRY ||
+	    func.GetChildren()[1]->GetReturnType().id() != LogicalTypeId::GEOMETRY) {
 		return false;
 	}
 
@@ -125,6 +143,70 @@ static bool IsSpatialJoinPredicate(const unique_ptr<Expression> &expr, const uno
 	}
 
 	return true;
+}
+
+// Look through GEOMETRY->GEOMETRY casts down to a plain column reference
+static bool TryGetProbeColumnBinding(const Expression &expr, ColumnBinding &binding) {
+	reference<const Expression> current = expr;
+	while (BoundCastExpression::IsCast(current.get())) {
+		auto &cast_child = BoundCastExpression::Child(current.get().Cast<BoundFunctionExpression>());
+		if (cast_child.GetReturnType().id() != LogicalTypeId::GEOMETRY) {
+			return false;
+		}
+		current = cast_child;
+	}
+	if (current.get().GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) {
+		return false;
+	}
+	binding = current.get().Cast<BoundColumnRefExpression>().Binding();
+	return true;
+}
+
+// Set up a bbox filter pushdown into the probe-side scan(s), mirroring the hash join's JoinFilterPushdownOptimizer.
+// The build-side R-tree's bounding box is computed at runtime (in the physical operator's Finalize) and pushed as an
+// ST_Intersects_Extent expression filter, which the geometry zonemap can use to prune row groups on the probe side.
+static void SetupFilterPushdown(LogicalSpatialJoin &join) {
+	// We can only filter the probe (left) side when unmatched probe rows are dropped, i.e. for INNER and RIGHT joins.
+	// LEFT/OUTER must emit every probe row.
+	if (join.join_type != JoinType::INNER && join.join_type != JoinType::RIGHT) {
+		return;
+	}
+
+	auto &pred = join.spatial_predicate->Cast<BoundFunctionExpression>();
+
+	// The probe side is always children[0] of the (possibly flipped) predicate.
+	ColumnBinding probe_binding;
+	if (!TryGetProbeColumnBinding(*pred.GetChildren()[0], probe_binding)) {
+		// Probe key is not a plain geometry column reference, cannot push down
+		return;
+	}
+
+	// Reuse the core traversal to find the LogicalGet(s) the probe column maps to (through projections, filters, etc.)
+	vector<JoinFilterPushdownColumn> columns;
+	JoinFilterPushdownColumn column;
+	column.probe_column_index = probe_binding;
+	columns.push_back(column);
+
+	vector<PushdownFilterTarget> targets;
+	JoinFilterPushdownOptimizer::GetPushdownFilterTargets(*join.children[0], std::move(columns), targets);
+
+	for (auto &target : targets) {
+		auto &get = target.get;
+		for (auto &col : target.columns) {
+			// The geometry zonemap pruning only applies to GEOMETRY columns
+			if (col.storage_type.id() != LogicalTypeId::GEOMETRY) {
+				continue;
+			}
+			if (!get.dynamic_filters) {
+				get.dynamic_filters = make_shared_ptr<DynamicTableFilterSet>();
+			}
+			SpatialJoinPushdownTarget pushdown_target;
+			pushdown_target.dynamic_filters = get.dynamic_filters;
+			pushdown_target.probe_column_index = col.probe_column_index.column_index;
+			pushdown_target.column_type = col.storage_type;
+			join.filter_pushdown_targets.push_back(std::move(pushdown_target));
+		}
+	}
 }
 
 static bool TrySwapComparisonJoin(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
@@ -196,6 +278,9 @@ static bool TrySwapComparisonJoin(OptimizerExtensionInput &input, unique_ptr<Log
 		spatial_join->has_const_distance =
 		    ST_DWithinHelper::TryGetConstDistance(pred_func.BindInfo(), spatial_join->const_distance);
 	}
+
+	// Try to set up bounding-box filter pushdown into the probe-side scan(s)
+	SetupFilterPushdown(*spatial_join);
 
 	// Also take all the conditions from the comparison join and add them as filters
 	filter.expressions.clear();
@@ -302,6 +387,9 @@ static void TrySwapAnyJoin(OptimizerExtensionInput &input, unique_ptr<LogicalOpe
 		spatial_join->has_const_distance =
 		    ST_DWithinHelper::TryGetConstDistance(pred_func.BindInfo(), spatial_join->const_distance);
 	}
+
+	// Try to set up bounding-box filter pushdown into the probe-side scan(s)
+	SetupFilterPushdown(*spatial_join);
 
 	if (spatial_join->join_type == JoinType::INNER && !extra_predicates.empty()) {
 		// Create a filter on top of the spatial join for the extra predicates

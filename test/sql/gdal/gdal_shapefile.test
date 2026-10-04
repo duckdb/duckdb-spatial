@@ -1,3 +1,6 @@
+# name: test/sql/gdal/gdal_shapefile.test
+# group: [gdal]
+
 require spatial
 
 # This used to fail because our GDAL filesytem wrapper was too aggressive in marking EOF

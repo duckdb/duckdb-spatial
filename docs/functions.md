@@ -21,12 +21,14 @@
 | [`ST_Buffer`](#st_buffer) | Returns a buffer around the input geometry at the target distance |
 | [`ST_BuildArea`](#st_buildarea) | Creates a polygonal geometry by attemtping to "fill in" the input geometry. |
 | [`ST_Centroid`](#st_centroid) | Returns the centroid of a geometry |
+| [`ST_ClosestPoint`](#st_closestpoint) | Returns the closest point on the first geometry to the second geometry |
 | [`ST_Collect`](#st_collect) | Collects a list of geometries into a collection geometry. |
 | [`ST_CollectionExtract`](#st_collectionextract) | Extracts geometries from a GeometryCollection into a typed multi geometry. |
 | [`ST_ConcaveHull`](#st_concavehull) | Returns the 'concave' hull of the input geometry, containing all of the source input's points, and which can be used to create polygons from points. The ratio parameter dictates the level of concavity; 1.0 returns the convex hull; and 0 indicates to return the most concave hull possible. Set allowHoles to a non-zero value to allow output containing holes. |
 | [`ST_Contains`](#st_contains) | Returns true if the first geometry contains the second geometry |
 | [`ST_ContainsProperly`](#st_containsproperly) | Returns true if the first geometry \"properly\" contains the second geometry |
 | [`ST_ConvexHull`](#st_convexhull) | Returns the convex hull enclosing the geometry |
+| [`ST_CoverageClean`](#st_coverageclean) | Aligns the edges of a list of polygons whose edges are meant to align but are in fact exact matches. |
 | [`ST_CoverageInvalidEdges`](#st_coverageinvalidedges) | Returns the invalid edges in a polygonal coverage, which are edges that are not shared by two polygons. |
 | [`ST_CoverageSimplify`](#st_coveragesimplify) | Simplify the edges in a polygonal coverage, preserving the coverange by ensuring that the there are no seams between the resulting simplified polygons. |
 | [`ST_CoverageUnion`](#st_coverageunion) | Union all geometries in a polygonal coverage into a single geometry. |
@@ -47,6 +49,7 @@
 | [`ST_EndPoint`](#st_endpoint) | Returns the end point of a LINESTRING. |
 | [`ST_Envelope`](#st_envelope) | Returns the minimum bounding rectangle of a geometry as a polygon geometry |
 | [`ST_Equals`](#st_equals) | Returns true if the geometries are "equal" |
+| [`ST_Expand`](#st_expand) | Expand the input geometry by the specified distance, returning a polygon. |
 | [`ST_Extent`](#st_extent) | Returns the minimal bounding box enclosing the input geometry |
 | [`ST_Extent_Approx`](#st_extent_approx) | Returns the approximate bounding box of a geometry, if available. |
 | [`ST_ExteriorRing`](#st_exteriorring) | Returns the exterior ring (shell) of a polygon geometry. |
@@ -64,6 +67,7 @@
 | [`ST_HasM`](#st_hasm) | Check if the input geometry has M values. |
 | [`ST_HasZ`](#st_hasz) | Check if the input geometry has Z values. |
 | [`ST_Hilbert`](#st_hilbert) | Encodes the X and Y values as the hilbert curve index for a curve covering the given bounding box. |
+| [`ST_InteriorRingN`](#st_interiorringn) | Returns the N-th interior ring (hole) of a POLYGON as a LINESTRING. Indexing is 1-based  (n = 1 returns the first interior ring). Returns NULL if the polygon is empty or has fewer than N interior rings. |
 | [`ST_InterpolatePoint`](#st_interpolatepoint) | Computes the closest point on a LINESTRING to a given POINT and returns the interpolated M value of that point. |
 | [`ST_Intersection`](#st_intersection) | Returns the intersection of two geometries |
 | [`ST_Intersects`](#st_intersects) | Returns true if the geometries intersect |
@@ -123,7 +127,9 @@
 | [`ST_ShortestLine`](#st_shortestline) | Returns the shortest line between two geometries |
 | [`ST_Simplify`](#st_simplify) | Returns a simplified version of the geometry |
 | [`ST_SimplifyPreserveTopology`](#st_simplifypreservetopology) | Returns a simplified version of the geometry that preserves topology |
+| [`ST_Snap`](#st_snap) | Snaps the vertices and segments of a geometry to another geometry's vertices within the given tolerance |
 | [`ST_StartPoint`](#st_startpoint) | Returns the start point of a LINESTRING. |
+| [`ST_Subdivide`](#st_subdivide) | Recursively splits a geometry into sub-geometries until the number of vertices of each are below the threshold given by max_vertices. Accepts any type of input except for a GeometryCollection.Degenerate inputs can lead to results having more than max_vertices vertices due to a recursion depth limit. |
 | [`ST_SymDifference`](#st_symdifference) | Returns a geometry that represents the portions of two geometries that do not intersect |
 | [`ST_TileEnvelope`](#st_tileenvelope) | The `ST_TileEnvelope` scalar function generates tile envelope rectangular polygons from specified zoom level and tile indices. |
 | [`ST_Touches`](#st_touches) | Returns true if the geometries touch |
@@ -612,6 +618,21 @@ Returns the centroid of a geometry
 
 ----
 
+### ST_ClosestPoint
+
+
+#### Signature
+
+```sql
+GEOMETRY ST_ClosestPoint (geom1 GEOMETRY, geom2 GEOMETRY)
+```
+
+#### Description
+
+Returns the closest point on the first geometry to the second geometry
+
+----
+
 ### ST_Collect
 
 
@@ -769,6 +790,25 @@ GEOMETRY ST_ConvexHull (geom GEOMETRY)
 #### Description
 
 Returns the convex hull enclosing the geometry
+
+----
+
+### ST_CoverageClean
+
+
+#### Signatures
+
+```sql
+GEOMETRY ST_CoverageClean (geoms GEOMETRY[], snapping_distance DOUBLE, gap_maximum_width DOUBLE)
+GEOMETRY ST_CoverageClean (geoms GEOMETRY[], snapping_distance DOUBLE)
+GEOMETRY ST_CoverageClean (geoms GEOMETRY[])
+```
+
+#### Description
+
+Aligns the edges of a list of polygons whose edges are meant to align but are in fact exact matches.
+
+Returns a collection of fixed polygons with the same size and order as the input polygons. EMPTY will be used in place of collapsed polygons.
 
 ----
 
@@ -1151,6 +1191,33 @@ Returns true if the geometries are "equal"
 
 ----
 
+### ST_Expand
+
+
+#### Signature
+
+```sql
+GEOMETRY ST_Expand (geom GEOMETRY, distance DOUBLE)
+```
+
+#### Description
+
+Expand the input geometry by the specified distance, returning a polygon.
+
+`geom` is the input geometry.
+
+`distance` is the target distance for the expansion, using the same units as the input geometry.
+
+This is a planar operation and will not take into account the curvature of the earth.
+
+#### Example
+
+```sql
+SELECT ST_AsText(ST_Expand(ST_GeomFromText('POINT(20 30)'), 0.1));
+```
+
+----
+
 ### ST_Extent
 
 
@@ -1516,6 +1583,28 @@ Encodes the X and Y values as the hilbert curve index for a curve covering the g
 If a geometry is provided, the center of the approximate bounding box is used as the point to encode.
 If no bounding box is provided, the hilbert curve index is mapped to the full range of a single-presicion float.
 For the BOX_2D and BOX_2DF variants, the center of the box is used as the point to encode.
+
+----
+
+### ST_InteriorRingN
+
+
+#### Signatures
+
+```sql
+GEOMETRY ST_InteriorRingN (geom GEOMETRY, n BIGINT)
+LINESTRING_2D ST_InteriorRingN (polygon POLYGON_2D, n BIGINT)
+```
+
+#### Description
+
+Returns the N-th interior ring (hole) of a POLYGON as a LINESTRING. Indexing is 1-based  (n = 1 returns the first interior ring). Returns NULL if the polygon is empty or has fewer than N interior rings.
+
+#### Example
+
+```sql
+SELECT ST_AsText(ST_InteriorRingN(ST_GeomFromText('POLYGON((0 0,10 0,10 10,0 10,0 0),(2 2,4 2,4 4,2 4,2 2))'), 1));
+```
 
 ----
 
@@ -2019,11 +2108,20 @@ SELECT ST_MakePolygon(ST_LineString([ST_Point(0, 0), ST_Point(1, 0), ST_Point(1,
 
 ```sql
 GEOMETRY ST_MakeValid (geom GEOMETRY)
+GEOMETRY ST_MakeValid (geom GEOMETRY, method VARCHAR)
+GEOMETRY ST_MakeValid (geom GEOMETRY, method VARCHAR, keepCollapsed BOOLEAN)
 ```
 
 #### Description
 
-Returns a valid representation of the geometry
+Returns a valid representation of the geometry.
+
+`method`: accepts `LINEWORK` or `STRUCTURE`. This parameter is case-insensitive. The default value is `LINEWORK`.
+
+- The `LINEWORK` method combines all rings into a set of noded lines and then extracts valid polygons from that linework. This method keeps all input vertices.
+- The `STRUCTURE` method first makes all rings valid then merges shells and subtracts holes from shells to generate valid result. It assumes that holes and shells are correctly categorized.
+
+`keepCollapsed`: whether or not to retain components that have collapsed into a lower dimensionality. Only works with the  `STRUCTURE` method. The default value is `true`.
 
 ----
 
@@ -2598,6 +2696,43 @@ Returns a simplified version of the geometry that preserves topology
 
 ----
 
+### ST_Snap
+
+
+#### Signature
+
+```sql
+GEOMETRY ST_Snap (geom GEOMETRY, reference GEOMETRY, tolerance DOUBLE)
+```
+
+#### Description
+
+Snaps the vertices and segments of a geometry to another geometry's vertices within the given tolerance
+
+#### Example
+
+```sql
+-- Multipolygon snapped to linestring at 1.01x distance
+SELECT ST_AsText(ST_Snap(poly, line, ST_Distance(poly, line) * 1.01))
+FROM (SELECT
+    ST_GeomFromText('MULTIPOLYGON(((26 125,26 200,126 200,126 125,26 125),(51 150,101 150,76 175,51 150)),((151 100,151 200,176 175,151 100)))') AS poly,
+    ST_GeomFromText('LINESTRING(5 107,54 84,101 100)') AS line
+) AS foo;
+----
+MULTIPOLYGON (((26 125, 26 200, 126 200, 126 125, 101 100, 26 125), (51 150, 101 150, 76 175, 51 150)), ((151 100, 151 200, 176 175, 151 100)))
+
+-- Multipolygon snapped to linestring at 1.25x distance (more vertices snap)
+SELECT ST_AsText(ST_Snap(poly, line, ST_Distance(poly, line) * 1.25))
+FROM (SELECT
+    ST_GeomFromText('MULTIPOLYGON(((26 125,26 200,126 200,126 125,26 125),(51 150,101 150,76 175,51 150)),((151 100,151 200,176 175,151 100)))') AS poly,
+    ST_GeomFromText('LINESTRING(5 107,54 84,101 100)') AS line
+) AS foo;
+----
+MULTIPOLYGON (((5 107, 26 200, 126 200, 126 125, 101 100, 54 84, 5 107), (51 150, 101 150, 76 175, 51 150)), ((151 100, 151 200, 176 175, 151 100)))
+```
+
+----
+
 ### ST_StartPoint
 
 
@@ -2611,6 +2746,21 @@ POINT_2D ST_StartPoint (line LINESTRING_2D)
 #### Description
 
 Returns the start point of a LINESTRING.
+
+----
+
+### ST_Subdivide
+
+
+#### Signature
+
+```sql
+GEOMETRY ST_Subdivide (geom GEOMETRY, max_vertices UINTEGER)
+```
+
+#### Description
+
+Recursively splits a geometry into sub-geometries until the number of vertices of each are below the threshold given by max_vertices. Accepts any type of input except for a GeometryCollection.Degenerate inputs can lead to results having more than max_vertices vertices due to a recursion depth limit.
 
 ----
 

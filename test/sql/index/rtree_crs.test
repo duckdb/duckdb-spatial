@@ -1,0 +1,74 @@
+# name: test/sql/index/rtree_crs.test
+# group: [index]
+
+# Test that RTREE indexes can be created over GEOMETRY columns with a CRS
+require spatial
+
+load {TEST_DIR}/rtree_crs_test.db
+
+statement ok
+SET profiling_renderer_settings = MAP {'operator_casing': 'upper'};
+
+statement ok
+PRAGMA enable_verification;
+
+statement ok
+CREATE TABLE t1 (geom GEOMETRY('OGC:CRS84'));
+
+statement ok
+INSERT INTO t1 SELECT ST_Point(x, y)::GEOMETRY('OGC:CRS84') FROM range(0, 10) r1(x), range(0, 10) r2(y);
+
+statement ok
+CREATE INDEX my_idx ON t1 USING RTREE (geom);
+
+# Check that we get the index scan plan
+query II
+EXPLAIN SELECT * FROM t1 WHERE ST_Within(geom, ST_MakeEnvelope(1.5, 1.5, 3.5, 3.5));
+----
+physical_plan	<REGEX>:.*RTREE_INDEX_SCAN.*
+
+# Check that the index scan returns the correct results
+query I
+SELECT count(*) FROM t1 WHERE ST_Within(geom, ST_MakeEnvelope(1.5, 1.5, 3.5, 3.5));
+----
+4
+
+# Deletes should still be reflected in the index
+statement ok
+DELETE FROM t1 WHERE ST_Within(geom, ST_MakeEnvelope(1.5, 1.5, 3.5, 3.5));
+
+query I
+SELECT count(*) FROM t1 WHERE ST_Within(geom, ST_MakeEnvelope(0.5, 0.5, 4.5, 4.5));
+----
+12
+
+# The index should survive a restart
+restart
+
+statement ok
+SET profiling_renderer_settings = MAP {'operator_casing': 'upper'};
+
+query II
+EXPLAIN SELECT * FROM t1 WHERE ST_Within(geom, ST_MakeEnvelope(0.5, 0.5, 4.5, 4.5));
+----
+physical_plan	<REGEX>:.*RTREE_INDEX_SCAN.*
+
+query I
+SELECT count(*) FROM t1 WHERE ST_Within(geom, ST_MakeEnvelope(0.5, 0.5, 4.5, 4.5));
+----
+12
+
+# And rows can still be added to the index after the reload
+statement ok
+INSERT INTO t1 VALUES (ST_Point(2.0, 2.0)::GEOMETRY('OGC:CRS84'));
+
+query I
+SELECT count(*) FROM t1 WHERE ST_Within(geom, ST_MakeEnvelope(0.5, 0.5, 4.5, 4.5));
+----
+13
+
+statement ok
+DROP INDEX my_idx;
+
+statement ok
+DROP TABLE t1;

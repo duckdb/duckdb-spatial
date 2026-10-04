@@ -10,9 +10,10 @@ class Index;
 
 // This is created by the optimizer rule
 struct RTreeIndexScanBindData final : public TableFunctionData {
-	explicit RTreeIndexScanBindData(DuckTableEntry &table, shared_ptr<IndexEntry> index_entry,
-	                                Identifier index_name_p, const RTreeBounds &bbox)
-	    : table(table), index_name(std::move(index_name_p)), index_entry(std::move(index_entry)), bbox(bbox) {
+	explicit RTreeIndexScanBindData(DuckTableEntry &table, shared_ptr<IndexEntry> index_entry, Identifier index_name_p,
+	                                const RTreeBounds &bbox, bool deferred_bounds = false)
+	    : table(table), index_name(std::move(index_name_p)), index_entry(std::move(index_entry)), bbox(bbox),
+	      deferred_bounds(deferred_bounds) {
 	}
 
 	//! The table to scan
@@ -26,6 +27,11 @@ struct RTreeIndexScanBindData final : public TableFunctionData {
 
 	//! The bounds to scan
 	RTreeBounds bbox;
+
+	//! If set, the bounds are not known at plan time, but only when the scan is initialized from a bounding-box filter
+	//! pushed into the scan at runtime (e.g. by a spatial join build side).
+	//! If no such filter arrives (or it is not selective enough), the scan falls back to a full table scan.
+	bool deferred_bounds;
 
 public:
 	bool Equals(const FunctionData &other_p) const override {

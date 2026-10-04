@@ -1,3 +1,6 @@
+# name: test/sql/gdal/gdal_read.test
+# group: [gdal]
+
 require spatial
 
 query I

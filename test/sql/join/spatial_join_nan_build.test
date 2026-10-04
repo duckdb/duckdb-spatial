@@ -1,0 +1,80 @@
+# name: test/sql/join/spatial_join_nan_build.test
+# group: [join]
+
+# Regression test: a build-side geometry with NaN vertices has a non-NULL all-NaN bounding box
+# (unlike NULL and EMPTY geometries, which are filtered out). NaN boxes used to corrupt every box
+# union they participated in — both the join R-tree's node boxes and the root box pushed to the
+# probe side as a filter — silently dropping the matches of every build row unioned before them.
+# NaN boxes are now skipped when building the join R-tree (they can never satisfy any predicate).
+require spatial
+
+statement ok
+PRAGMA threads=4;
+
+statement ok
+CREATE TABLE probe AS SELECT ST_Point(x, y) AS geom FROM range(0, 100) r1(x), range(0, 100) r2(y);
+
+statement ok
+CREATE TABLE build_nan (geom GEOMETRY);
+
+# The NaN linestring sits between the two points, so a corrupted union would lose the matches
+# of the first point
+statement ok
+INSERT INTO build_nan VALUES
+	(ST_Point(10.2, 10.2)),
+	('LINESTRING(5 5, nan nan)'::GEOMETRY),
+	(ST_Point(90.2, 90.2));
+
+# Sanity check: NaN geometries never satisfy spatial predicates
+query II
+SELECT ST_DWithin(ST_Point(5, 5), 'LINESTRING(5 5, nan nan)'::GEOMETRY, 1.0),
+       ST_Intersects(ST_Point(5, 5), 'LINESTRING(5 5, nan nan)'::GEOMETRY);
+----
+false	false
+
+# 3 grid points lie within distance 1.0 of each of the two valid build points
+query I
+SELECT count(*) FROM probe p JOIN build_nan b ON ST_DWithin(p.geom, b.geom, 1.0);
+----
+6
+
+# The join must agree with the scalar predicates evaluated per build row
+query I
+SELECT (SELECT count(*) FROM probe p JOIN build_nan b ON ST_DWithin(p.geom, b.geom, 1.0))
+     = (SELECT count(*) FROM probe WHERE ST_DWithin(geom, ST_Point(10.2, 10.2), 1.0))
+     + (SELECT count(*) FROM probe WHERE ST_DWithin(geom, ST_Point(90.2, 90.2), 1.0));
+----
+true
+
+# Also with an R-tree index on the probe side (exercises the pushed bounding-box filter
+# and the deferred-bounds index scan)
+statement ok
+CREATE INDEX probe_idx ON probe USING RTREE (geom);
+
+query I
+SELECT count(*) FROM probe p JOIN build_nan b ON ST_DWithin(p.geom, b.geom, 1.0);
+----
+6
+
+# LEFT join: every probe row must survive
+query I
+SELECT count(*) FROM probe p LEFT JOIN build_nan b ON ST_DWithin(p.geom, b.geom, 1.0);
+----
+10000
+
+# Build side consisting ONLY of NaN geometries
+statement ok
+CREATE TABLE build_all_nan (geom GEOMETRY);
+
+statement ok
+INSERT INTO build_all_nan VALUES ('LINESTRING(5 5, nan nan)'::GEOMETRY);
+
+query I
+SELECT count(*) FROM probe p JOIN build_all_nan b ON ST_DWithin(p.geom, b.geom, 1.0);
+----
+0
+
+query I
+SELECT count(*) FROM probe p LEFT JOIN build_all_nan b ON ST_DWithin(p.geom, b.geom, 1.0);
+----
+10000

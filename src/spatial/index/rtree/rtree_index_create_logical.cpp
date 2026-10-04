@@ -73,16 +73,17 @@ static PhysicalOperator &CreateNullFilter(PhysicalPlanGenerator &generator, cons
 }
 
 static PhysicalOperator &CreateBoundingBoxProjection(PhysicalPlanGenerator &planner, const LogicalOperator &op,
-                                                     const vector<LogicalType> &types, ClientContext &context) {
+                                                     const vector<LogicalType> &types, const LogicalType &geom_type,
+                                                     ClientContext &context) {
 	auto &catalog = Catalog::GetSystemCatalog(context);
 
 	// Get the bounding box function
 	auto &bbox_func_entry =
 	    catalog.GetEntry(context, CatalogType::SCALAR_FUNCTION_ENTRY, Identifier::DefaultSchema(), "ST_Extent_Approx")
 	        .Cast<ScalarFunctionCatalogEntry>();
-	const auto &bbox_func = *bbox_func_entry.functions.GetFunctionByArguments(context, {LogicalType::GEOMETRY()});
+	const auto &bbox_func = *bbox_func_entry.functions.GetFunctionByArguments(context, {geom_type});
 
-	auto geom_ref_expr = make_uniq_base<Expression, BoundReferenceExpression>(LogicalType::GEOMETRY(), 0);
+	auto geom_ref_expr = make_uniq_base<Expression, BoundReferenceExpression>(geom_type, 0);
 	vector<unique_ptr<Expression>> bbox_args;
 	bbox_args.push_back(std::move(geom_ref_expr));
 
@@ -150,8 +151,8 @@ PhysicalOperator &RTreeIndex::CreatePlan(PlanIndexInput &input) {
 
 	auto &expr = op.unbound_expressions[0];
 
-	// Validate that we have the right type of expression (float array)
-	if (expr->GetReturnType() != LogicalType::GEOMETRY()) {
+	// Validate that we have the right type of expression (also allow GEOMETRY types with a CRS)
+	if (expr->GetReturnType().id() != LogicalTypeId::GEOMETRY) {
 		throw BinderException("RTree indexes can only be created over GEOMETRY columns.");
 	}
 
@@ -185,7 +186,7 @@ PhysicalOperator &RTreeIndex::CreatePlan(PlanIndexInput &input) {
 
 	// Project the bounding box and the row ID
 	vector<LogicalType> projected_types = {GeoTypes::BOX_2DF(), LogicalType::ROW_TYPE};
-	auto &bbox_proj = CreateBoundingBoxProjection(planner, op, projected_types, context);
+	auto &bbox_proj = CreateBoundingBoxProjection(planner, op, projected_types, new_column_types[0], context);
 	bbox_proj.children.push_back(null_filter);
 
 	// Create an ORDER_BY operator to sort the bounding boxes by the xmin value
@@ -217,8 +218,8 @@ PhysicalOperator &LogicalCreateRTreeIndex::CreatePlan(ClientContext &context, Ph
 
 	auto &expr = op.unbound_expressions[0];
 
-	// Validate that we have the right type of expression (float array)
-	if (expr->GetReturnType() != LogicalType::GEOMETRY()) {
+	// Validate that we have the right type of expression (also allow GEOMETRY types with a CRS)
+	if (expr->GetReturnType().id() != LogicalTypeId::GEOMETRY) {
 		throw BinderException("RTree indexes can only be created over GEOMETRY columns.");
 	}
 
@@ -262,7 +263,7 @@ PhysicalOperator &LogicalCreateRTreeIndex::CreatePlan(ClientContext &context, Ph
 
 	// Project the bounding box and the row ID
 	vector<LogicalType> projected_types = {GeoTypes::BOX_2DF(), LogicalType::ROW_TYPE};
-	auto &bbox_proj = CreateBoundingBoxProjection(planner, op, projected_types, context);
+	auto &bbox_proj = CreateBoundingBoxProjection(planner, op, projected_types, new_column_types[0], context);
 	bbox_proj.children.push_back(null_filter);
 
 	// Create an ORDER_BY operator to sort the bounding boxes by the xmin value

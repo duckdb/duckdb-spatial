@@ -135,6 +135,7 @@ public:
 
 			UnaryExecutor::Execute<string_t, RETURN_TYPE>(
 			    probe_vec, result, args.size(), [&](const string_t &probe_blob) {
+			    	lstate.GetArena().Reset();
 				    const auto probe_geom = lstate.Deserialize(probe_blob);
 				    return IMPL::ExecutePredicatePrepared(const_prep, probe_geom);
 			    });
@@ -142,6 +143,7 @@ public:
 			// Both are non-const, just execute normally
 			BinaryExecutor::Execute<string_t, string_t, RETURN_TYPE>(
 			    lhs_vec, rhs_vec, result, args.size(), [&](const string_t &lhs_blob, const string_t &rhs_blob) {
+			    	lstate.GetArena().Reset();
 				    const auto lhs = lstate.Deserialize(lhs_blob);
 				    const auto rhs = lstate.Deserialize(rhs_blob);
 				    return IMPL::ExecutePredicateNormal(lhs, rhs);
@@ -181,6 +183,7 @@ public:
 			const auto lhs_prep = lhs_geom.get_prepared();
 
 			UnaryExecutor::Execute<string_t, RETURN_TYPE>(rhs_vec, result, args.size(), [&](const string_t &rhs_blob) {
+				lstate.GetArena().Reset();
 				const auto rhs_geom = lstate.Deserialize(rhs_blob);
 				return IMPL::ExecutePredicatePrepared(lhs_prep, rhs_geom);
 			});
@@ -188,6 +191,7 @@ public:
 			// Both are non-const, just execute normally
 			BinaryExecutor::Execute<string_t, string_t, RETURN_TYPE>(
 			    lhs_vec, rhs_vec, result, args.size(), [&](const string_t &lhs_blob, const string_t &rhs_blob) {
+				    lstate.GetArena().Reset();
 				    const auto lhs = lstate.Deserialize(lhs_blob);
 				    const auto rhs = lstate.Deserialize(rhs_blob);
 				    return IMPL::ExecutePredicateNormal(lhs, rhs);
@@ -1751,9 +1755,53 @@ struct ST_MakeValid {
 
 		UnaryExecutor::Execute<string_t, string_t>(args.data[0], result, args.size(), [&](const string_t &geom_blob) {
 			const auto geom = lstate.Deserialize(geom_blob);
-			const auto valid = geom.get_made_valid();
+			const auto valid = geom.get_made_valid(GEOS_MAKE_VALID_LINEWORK, true);
 			return lstate.Serialize(result, valid);
 		});
+	}
+
+	static GEOSMakeValidMethods TryParseMethod(const string_t &method_str) {
+		auto method_std = StringUtil::Lower(method_str.GetString());
+
+		if (method_std == "linework") {
+			return GEOS_MAKE_VALID_LINEWORK;
+		} else if (method_std == "structure") {
+			return GEOS_MAKE_VALID_STRUCTURE;
+		}
+
+		throw InvalidInputException("Unknown method: '%s', accepted inputs: linework, structure",
+		                           method_str.GetString().c_str());
+	}
+
+	static void ExecuteWithMethod(DataChunk &args, ExpressionState &state, Vector &result) {
+		auto &lstate = LocalState::ResetAndGet(state);
+
+		BinaryExecutor::Execute<string_t, string_t, string_t>(
+		    args.data[0], args.data[1], result, args.size(),
+		    [&](const string_t &blob, const string_t &method_str) {
+			    const auto geom = lstate.Deserialize(blob);
+			    const auto method = TryParseMethod(method_str);
+			    const auto valid = geom.get_made_valid(method, true);
+			    return lstate.Serialize(result, valid);
+		    });
+	}
+
+	static void ExecuteWithKeepCollapsed(DataChunk &args, ExpressionState &state, Vector &result) {
+		auto &lstate = LocalState::ResetAndGet(state);
+
+		TernaryExecutor::Execute<string_t, string_t, bool, string_t>(
+		    args.data[0], args.data[1], args.data[2], result,
+		    [&](const string_t &blob, const string_t &method_str, bool keepCollapsed) {
+			    const auto geom = lstate.Deserialize(blob);
+			    const auto method = TryParseMethod(method_str);
+
+			    if (method == GEOS_MAKE_VALID_LINEWORK) {
+			      throw InvalidInputException("The 'LINEWORK' method doesn't accept keepCollapsed parameter");
+			    }
+
+			    const auto valid = geom.get_made_valid(method, keepCollapsed);
+			    return lstate.Serialize(result, valid);
+		    });
 	}
 
 	static void Register(ExtensionLoader &loader) {
@@ -1765,6 +1813,29 @@ struct ST_MakeValid {
 				variant.SetBind(GeoTypes::PropagateCRS);
 				variant.SetInit(LocalState::Init);
 				variant.SetFunction(Execute);
+				variant.CanThrowErrors();
+			});
+
+			func.AddVariant([](ScalarFunctionVariantBuilder &variant) {
+				variant.AddParameter("geom", LogicalType::GEOMETRY());
+				variant.AddParameter("method", LogicalType::VARCHAR);
+				variant.SetReturnType(LogicalType::GEOMETRY());
+
+				variant.SetBind(GeoTypes::PropagateCRS);
+				variant.SetInit(LocalState::Init);
+				variant.SetFunction(ExecuteWithMethod);
+				variant.CanThrowErrors();
+			});
+
+			func.AddVariant([](ScalarFunctionVariantBuilder &variant) {
+				variant.AddParameter("geom", LogicalType::GEOMETRY());
+				variant.AddParameter("method", LogicalType::VARCHAR);
+				variant.AddParameter("keepCollapsed", LogicalType::BOOLEAN);
+				variant.SetReturnType(LogicalType::GEOMETRY());
+
+				variant.SetBind(GeoTypes::PropagateCRS);
+				variant.SetInit(LocalState::Init);
+				variant.SetFunction(ExecuteWithKeepCollapsed);
 				variant.CanThrowErrors();
 			});
 
@@ -2262,6 +2333,39 @@ struct ST_ShortestLine {
 	}
 };
 
+struct ST_Snap {
+	static void Execute(DataChunk &args, ExpressionState &state, Vector &result) {
+		auto &lstate = LocalState::ResetAndGet(state);
+		TernaryExecutor::Execute<string_t, string_t, double, string_t>(
+		    args.data[0], args.data[1], args.data[2], result,
+		    [&](const string_t &geom_blob, const string_t &snap_to_blob, double tolerance) {
+			    const auto geom = lstate.Deserialize(geom_blob);
+			    const auto snap_to = lstate.Deserialize(snap_to_blob);
+			    const auto snapped = geom.get_snap(snap_to, tolerance);
+			    return lstate.Serialize(result, snapped);
+		    });
+	}
+
+	static void Register(ExtensionLoader &loader) {
+		FunctionBuilder::RegisterScalar(loader, "ST_Snap", [](ScalarFunctionBuilder &func) {
+			func.AddVariant([](ScalarFunctionVariantBuilder &variant) {
+				variant.AddParameter("geom", LogicalType::GEOMETRY());
+				variant.AddParameter("snap_to", LogicalType::GEOMETRY());
+				variant.AddParameter("tolerance", LogicalType::DOUBLE);
+				variant.SetReturnType(LogicalType::GEOMETRY());
+				variant.SetBind(GeoTypes::PropagateCRS);
+				variant.SetInit(LocalState::Init);
+				variant.SetFunction(Execute);
+				variant.CanThrowErrors();
+			});
+			func.SetDescription("Snaps the vertices and segments of a geometry to another geometry's vertices within "
+			                    "the given tolerance");
+			func.SetTag("ext", "spatial");
+			func.SetTag("category", "construction");
+		});
+	}
+};
+
 struct ST_ClosestPoint {
 	static void Execute(DataChunk &args, ExpressionState &state, Vector &result) {
 		auto &lstate = LocalState::ResetAndGet(state);
@@ -2391,6 +2495,156 @@ struct ST_SymDifference {
 			func.SetDescription("Returns the symmetric difference of two geometries");
 			func.SetTag("ext", "spatial");
 			func.SetTag("category", "construction");
+		});
+	}
+};
+
+struct ST_Subdivide {
+	static void SubdivideRecursive(GEOSContextHandle_t handle_p, GeosCollection &collection, const GeosGeometry &geom,
+	                               const size_t max_vertices, const size_t dimension, const size_t depth) {
+		constexpr size_t max_depth = 50;
+
+		// If we get a lower-dimensional object from an intersection, we abort
+		if (geom.get_dimension() < dimension) {
+			return;
+		}
+
+		// A MultiPoint is ignored here on purpose as MultiPoints get treated as one
+		// object compared to multiple distinct objects
+		if (geom.type() == GEOS_MULTILINESTRING || geom.type() == GEOS_MULTIPOLYGON || geom.type() == GEOS_GEOMETRYCOLLECTION) {
+			for (size_t i = 0; i < geom.get_num_geometries(); i++) {
+				const auto subgeom = geom.get_geometry_n(i);
+
+				// Do not increment depth as we are still on the same level, just processing individual
+				// parts of the geometry
+				SubdivideRecursive(handle_p, collection, subgeom, max_vertices, dimension, depth);
+			}
+			return;
+		}
+
+		if (geom.get_num_vertices() <= max_vertices) {
+			collection.add(std::move(geom.get_clone()));
+			return;
+		}
+
+		// Went so far that we will just add the rest all at once.
+		if (depth > max_depth) {
+			collection.add(std::move(geom.get_clone()));
+			return;
+		}
+
+		double xmin, ymin, xmax, ymax;
+		geom.get_extent(xmin, ymin, xmax, ymax);
+
+		const double width = xmax - xmin;
+		const double height = ymax - ymin;
+
+		if (width == 0.0 && height == 0.0) {
+			if (geom.type() == GEOS_POINT) {
+				collection.add(std::move(geom.get_clone()));
+			}
+
+			throw InvalidInputException("cannot subdivide non-point geometries with zero width and height");
+		}
+
+		// no need to recompute proper width and height values after this step, as they are just used
+		// to decide on whether the next division is horizontal or vertical
+		if (width == 0.0) {
+			xmin -= 1e-12;
+			xmax += 1e-12;
+		}
+
+		if (height == 0.0) {
+			ymin -= 1e-12;
+			ymax += 1e-12;
+		}
+
+		double xmin_a, xmax_a, ymin_a, ymax_a;
+		double xmin_b, xmax_b, ymin_b, ymax_b;
+		if (width > height) {
+			xmin_a = xmin;
+			xmax_a = (xmax + xmin) / 2.0;
+			ymin_a = ymin;
+			ymax_a = ymax;
+
+			xmin_b = (xmax + xmin) / 2.0;
+			xmax_b = xmax;
+			ymin_b = ymin;
+			ymax_b = ymax;
+		} else {
+			xmin_a = xmin;
+			xmax_a = xmax;
+			ymin_a = ymin;
+			ymax_a = (ymax + ymin) / 2.0;
+
+			xmin_b = xmin;
+			xmax_b = xmax;
+			ymin_b = (ymax + ymin) / 2.0;
+			ymax_b = ymax;
+		}
+
+		{
+			const GeosGeometry clipping_rect_a = GeosGeometry(handle_p, xmin_a, ymin_a, xmax_a, ymax_a);
+			const GeosGeometry clipped_a = geom.get_intersection(clipping_rect_a);
+			if (!clipped_a.is_empty()) {
+				SubdivideRecursive(handle_p, collection, clipped_a, max_vertices, dimension, depth + 1);
+			}
+		}
+		{
+			const GeosGeometry clipping_rect_b = GeosGeometry(handle_p, xmin_b, ymin_b, xmax_b, ymax_b);
+			const GeosGeometry clipped_b = geom.get_intersection(clipping_rect_b);
+			if (!clipped_b.is_empty()) {
+				SubdivideRecursive(handle_p, collection, clipped_b, max_vertices, dimension, depth + 1);
+			}
+		}
+
+		return;
+	}
+
+	static void Execute(DataChunk &args, ExpressionState &state, Vector &result) {
+		auto &lstate = LocalState::ResetAndGet(state);
+
+		BinaryExecutor::Execute<string_t, uint32_t, string_t>(
+		    args.data[0], args.data[1], result, args.size(),
+		    [&](const string_t &geom_blob, const uint32_t max_vertices) {
+			    if (max_vertices < 5) {
+				    throw InvalidInputException("max_vertices needs to be larger or equal to 5");
+			    }
+
+			    const auto geom = lstate.Deserialize(geom_blob);
+
+			    if (geom.type() == GEOS_GEOMETRYCOLLECTION) {
+				    throw InvalidInputException("Cannot subdivide GeometryCollection");
+			    }
+
+			    if (geom.is_empty()) {
+				    return lstate.Serialize(result, geom);
+			    }
+
+			    GeosCollection collection {lstate.GetContext()};
+			    SubdivideRecursive(lstate.GetContext(), collection, geom, max_vertices, geom.get_dimension(), 0);
+
+			    return lstate.Serialize(result, collection.get_collection());
+		    });
+	}
+
+	static void Register(ExtensionLoader &loader) {
+		FunctionBuilder::RegisterScalar(loader, "ST_Subdivide", [](ScalarFunctionBuilder &func) {
+			func.AddVariant([](ScalarFunctionVariantBuilder &variant) {
+				variant.AddParameter("geom", LogicalType::GEOMETRY());
+				variant.AddParameter("max_vertices", LogicalType::UINTEGER);
+				variant.SetReturnType(LogicalType::GEOMETRY());
+
+				variant.SetInit(LocalState::Init);
+				variant.SetFunction(Execute);
+			});
+
+			func.SetDescription(
+			    "Recursively splits a geometry into sub-geometries until the number of vertices of each are below the "
+			    "threshold given by max_vertices. Accepts any type of input except for a GeometryCollection."
+			    "Degenerate inputs can lead to results having more than max_vertices vertices due to a recursion depth limit.");
+			func.SetTag("ext", "spatial");
+			func.SetTag("category", "relation");
 		});
 	}
 };
@@ -3371,7 +3625,9 @@ void RegisterGEOSModule(ExtensionLoader &loader) {
 	ST_ShortestLine::Register(loader);
 	ST_Simplify::Register(loader);
 	ST_SimplifyPreserveTopology::Register(loader);
+	ST_Snap::Register(loader);
 	ST_SymDifference::Register(loader);
+	ST_Subdivide::Register(loader);
 	ST_Touches::Register(loader);
 	ST_Union::Register(loader);
 	ST_VoronoiDiagram::Register(loader);

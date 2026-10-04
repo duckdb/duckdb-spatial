@@ -1,3 +1,6 @@
+# name: test/sql/gdal/st_read_xlsx.test
+# group: [gdal]
+
 require spatial
 
 # Test XLSX driver roundtrip

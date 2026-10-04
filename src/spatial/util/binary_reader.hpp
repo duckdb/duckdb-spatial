@@ -75,8 +75,9 @@ public:
 
 private:
 	void CheckSize(const size_t size) const {
-		if (ptr + size > end) {
-			throw InternalException("Buffer overflow");
+		if (size > static_cast<size_t>(end - ptr)) {
+			throw InvalidInputException("Unexpected end of binary data at position %zu",
+			                            static_cast<size_t>(ptr - beg));
 		}
 	}
 

@@ -2,6 +2,8 @@
 
 #include "duckdb/planner/operator/logical_extension_operator.hpp"
 
+#include "spatial/operators/spatial_join_physical.hpp"
+
 namespace duckdb {
 
 class LogicalSpatialJoin final : public LogicalExtensionOperator {
@@ -30,6 +32,10 @@ public:
 
 	bool has_const_distance = false;
 	double const_distance = 0.0;
+
+	//! Probe-side targets into which we push a bounding-box filter derived from the build-side R-tree.
+	//! Populated by the optimizer; not serialized (holds runtime shared_ptrs).
+	vector<SpatialJoinPushdownTarget> filter_pushdown_targets;
 
 public:
 	explicit LogicalSpatialJoin(JoinType join_type_p);

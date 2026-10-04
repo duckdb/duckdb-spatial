@@ -76,7 +76,8 @@ PhysicalOperator &LogicalSpatialJoin::CreatePlan(ClientContext &context, Physica
 	auto &right = generator.CreatePlan(*children[1]);
 
 	return generator.Make<PhysicalSpatialJoin>(*this, left, right, std::move(spatial_predicate), join_type,
-	                                           estimated_cardinality, has_const_distance, const_distance);
+	                                           estimated_cardinality, has_const_distance, const_distance,
+	                                           std::move(filter_pushdown_targets));
 }
 
 void LogicalSpatialJoin::Serialize(Serializer &writer) const {
