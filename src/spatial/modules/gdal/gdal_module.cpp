@@ -18,6 +18,7 @@
 #include "duckdb/parser/expression/function_expression.hpp"
 #include "duckdb/common/multi_file/multi_file_reader.hpp"
 #include "duckdb/common/types/uuid.hpp"
+#include "duckdb/common/operator/cast_operators.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
 
 #include <utility>
@@ -720,8 +721,9 @@ auto Bind(ClientContext &ctx, TableFunctionBindInput &input, vector<LogicalType>
 		ThrowGDALError(StringUtil::Format("Could not open GDAL dataset at: %s", result->real_file_path));
 	}
 
-	ArrowSchema schema;
-	ArrowArrayStream stream;
+	// Zero-initialize so that the cleanup path below can safely check the release callbacks
+	ArrowSchema schema = {};
+	ArrowArrayStream stream = {};
 
 	try {
 
@@ -733,36 +735,37 @@ auto Bind(ClientContext &ctx, TableFunctionBindInput &input, vector<LogicalType>
 		// Find layer
 		const auto layer_param = input.named_parameters.find("layer");
 
-		if (layer_param != input.named_parameters.end()) {
-			if (layer_param->second.type() == LogicalType::INTEGER) {
-				// Find layer by index
-				const auto layer_idx = IntegerValue::Get(layer_param->second);
-				if (layer_idx < 0) {
-					throw BinderException("Layer index must be positive");
+		// A NULL layer means "use the first layer"
+		if (layer_param != input.named_parameters.end() && !layer_param->second.IsNull()) {
+			const auto &layer_name = StringValue::Get(layer_param->second);
+			auto found = false;
+
+			// First, try to find the layer by name
+			for (int i = 0; i < layer_count; i++) {
+				const auto layer = GDALDatasetGetLayer(dataset, i);
+				if (!layer) {
+					continue;
 				}
-				if (layer_idx > layer_count) {
-					throw BinderException(
-					    StringUtil::Format("Layer index out of range (%s > %s)", layer_idx, layer_count));
+				if (OGR_L_GetName(layer) == layer_name) {
+					result->layer_idx = i;
+					found = true;
+					break;
+				}
+			}
+
+			// Otherwise, try to interpret the value as a layer index
+			int32_t layer_idx;
+			if (!found && TryCast::Operation(string_t(layer_name), layer_idx, true)) {
+				if (layer_idx < 0 || layer_idx >= layer_count) {
+					throw BinderException("Layer index out of range (%d), dataset has %d layer(s)", layer_idx,
+					                      layer_count);
 				}
 				result->layer_idx = layer_idx;
-			} else if (layer_param->second.type() == LogicalType::VARCHAR) {
-				// Find layer by name
-				const auto &layer_name = StringValue::Get(layer_param->second);
-				auto found = false;
-				for (int i = 0; i < layer_count; i++) {
-					const auto layer = GDALDatasetGetLayer(dataset, i);
-					if (!layer) {
-						continue;
-					}
-					if (OGR_L_GetName(layer) == layer_name) {
-						result->layer_idx = i;
-						found = true;
-						break;
-					}
-				}
-				if (!found) {
-					throw BinderException("Could not find layer with name: %s", layer_name);
-				}
+				found = true;
+			}
+
+			if (!found) {
+				throw BinderException("Could not find layer with name: %s", layer_name);
 			}
 		}
 
@@ -1049,11 +1052,11 @@ public:
 		}
 	}
 
-	GDALDatasetH dataset;
+	GDALDatasetH dataset = nullptr;
 	CPLStringList layer_options;
-	OGRLayerH layer;
-	ArrowArrayStream stream;
-	ArrowSchema schema;
+	OGRLayerH layer = nullptr;
+	ArrowArrayStream stream = {};
+	ArrowSchema schema = {};
 	vector<unique_ptr<ArrowType>> col_types;
 	atomic<idx_t> features_read = {0};
 };
@@ -1092,6 +1095,10 @@ auto InitGlobal(ClientContext &context, TableFunctionInitInput &input) -> unique
 				OGR_F_Destroy(feature);
 			}
 		}
+	}
+
+	if (!result->layer) {
+		throw IOException("Could not get GDAL layer at: %s", bdata.real_file_path);
 	}
 
 	// Set the filter, if we got one
