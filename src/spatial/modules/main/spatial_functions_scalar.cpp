@@ -9480,7 +9480,7 @@ bool ST_DWithinHelper::TryGetConstDistance(const unique_ptr<FunctionData> &bind_
 void RegisterSpatialScalarFunctions(ExtensionLoader &loader) {
 	ST_Affine::Register(loader);
 	ST_Area::Register(loader);
-	ST_AsGeoJSON::Register(loader);
+	// ST_AsGeoJSON::Register(loader);
 	ST_AsText::Register(loader);
 	// ST_AsWKB::Register(loader);
 	ST_AsHEXWKB::Register(loader);
@@ -9507,7 +9507,7 @@ void RegisterSpatialScalarFunctions(ExtensionLoader &loader) {
 	ST_Force4D::Register(loader);
 	ST_GeometryType::Register(loader);
 	ST_GeomFromHEXWKB::Register(loader);
-	ST_GeomFromGeoJSON::Register(loader);
+	// ST_GeomFromGeoJSON::Register(loader);
 	ST_GeomFromText::Register(loader);
 	ST_GeomFromWKB::Register(loader);
 	ST_HasZ::Register(loader);
