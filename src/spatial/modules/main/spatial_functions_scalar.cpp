@@ -4996,6 +4996,7 @@ struct ST_GeomFromWKB {
 
 				variant.SetInit(LocalState::Init);
 				variant.SetFunction(ExecuteLineString);
+				variant.CanThrowErrors();
 			});
 
 			builder.SetDescription("Deserialize a LINESTRING_2D from a WKB encoded blob");
@@ -5011,6 +5012,7 @@ struct ST_GeomFromWKB {
 
 				variant.SetInit(LocalState::Init);
 				variant.SetFunction(ExecutePolygon);
+				variant.CanThrowErrors();
 			});
 
 			builder.SetDescription("Deserialize a POLYGON_2D from a WKB encoded blob");
