@@ -2,6 +2,7 @@
 #include "duckdb/common/vector/struct_vector.hpp"
 #include "spatial/index/rtree/rtree_index.hpp"
 
+#include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/scalar_function_catalog_entry.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"

@@ -12,6 +12,7 @@
 #include "duckdb/storage/storage_manager.hpp"
 #include "duckdb/storage/table_io_manager.hpp"
 #include "duckdb/parallel/base_pipeline_event.hpp"
+#include "duckdb/planner/logical_operator.hpp"
 
 namespace duckdb {
 

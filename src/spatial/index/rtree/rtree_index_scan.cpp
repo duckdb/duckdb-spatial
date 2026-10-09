@@ -2,6 +2,7 @@
 #include "spatial/index/rtree/rtree_index.hpp"
 #include "spatial/index/rtree/rtree_index_scan.hpp"
 
+#include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
 #include "duckdb/catalog/dependency_list.hpp"
 #include "duckdb/common/mutex.hpp"
