@@ -280,7 +280,7 @@ IndexStorageInfo RTreeIndex::SerializeToWAL(const case_insensitive_map_t<Value> 
 	return info;
 }
 
-idx_t RTreeIndex::GetInMemorySize(IndexLock &state) {
+idx_t RTreeIndex::GetInMemorySize(IndexLock &state) const {
 	const auto &leaf_alloc = tree->GetLeafAllocator();
 	const auto &node_alloc = tree->GetNodeAllocator();
 	return leaf_alloc.GetInMemorySize() + node_alloc.GetInMemorySize();
