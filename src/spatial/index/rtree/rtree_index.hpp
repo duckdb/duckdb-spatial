@@ -81,7 +81,7 @@ public:
 	void VerifyBuffers(IndexLock &l) override;
 
 	string GetConstraintViolationMessage(VerifyExistenceType verify_type, idx_t failed_index,
-	                                     DataChunk &input) override {
+	                                     DataChunk &input) const override {
 		return "Constraint violation in RTree index";
 	}
 };
