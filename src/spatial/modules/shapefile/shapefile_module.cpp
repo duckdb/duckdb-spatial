@@ -966,8 +966,8 @@ struct Shapefile_Meta {
 			auto str = string_t(shape_type_map[i].shp_name);
 			varchar_data[i] = str.IsInlined() ? str : StringVector::AddString(varchar_vector, str);
 		}
-		auto shape_type_enum = LogicalType::ENUM("SHAPE_TYPE", varchar_vector, shape_type_count);
-		shape_type_enum.SetAlias("SHAPE_TYPE");
+		auto shape_type_enum =
+		    LogicalType::ENUM("SHAPE_TYPE", varchar_vector, shape_type_count).WithAlias("SHAPE_TYPE");
 
 		return_types.push_back(LogicalType::VARCHAR);
 		return_types.push_back(shape_type_enum);

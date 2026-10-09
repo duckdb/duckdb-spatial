@@ -11,9 +11,7 @@ namespace {
 struct WKBTypes {
 
 	static LogicalType WKB_BLOB() {
-		auto blob_type = LogicalType(LogicalTypeId::BLOB);
-		blob_type.SetAlias("WKB_BLOB");
-		return blob_type;
+		return LogicalType(LogicalTypeId::BLOB).WithAlias("WKB_BLOB");
 	}
 
 	static bool ToWKBCast(Vector &source, Vector &result, idx_t count, CastParameters &) {
