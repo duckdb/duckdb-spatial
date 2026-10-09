@@ -1419,8 +1419,8 @@ public:
 	}
 };
 
-bool MatchOption(const char *name, const pair<string, vector<Value>> &option, bool list = false) {
-	if (StringUtil::CIEquals(name, option.first)) {
+bool MatchOption(const char *name, const pair<const Identifier, vector<Value>> &option, bool list = false) {
+	if (option.first == name) {
 		if (option.second.empty()) {
 			throw BinderException("GDAL COPY option '%s' requires a value", name);
 		}
