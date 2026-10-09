@@ -6,6 +6,7 @@
 #include "spatial/geometry/geometry_serialization.hpp"
 
 #include "duckdb/common/vector_operations/generic_executor.hpp"
+#include "duckdb/logging/logger.hpp"
 #include "duckdb/parser/parsed_data/create_table_function_info.hpp"
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"

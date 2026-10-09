@@ -4,6 +4,9 @@
 
 // DUCKDB
 #include "duckdb/main/extension/extension_loader.hpp"
+#include "duckdb/logging/logger.hpp"
+#include "duckdb/planner/expression_iterator.hpp"
+#include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/function/copy_function.hpp"
 #include "duckdb/function/table/arrow.hpp"
 #include "duckdb/common/arrow/arrow_converter.hpp"

@@ -1,4 +1,5 @@
 #include "duckdb/common/vector/map_vector.hpp"
+#include "duckdb/common/queue.hpp"
 #include "duckdb/common/vector/struct_vector.hpp"
 #include "spatial/operators/spatial_join_physical.hpp"
 #include "spatial/operators/spatial_join_logical.hpp"

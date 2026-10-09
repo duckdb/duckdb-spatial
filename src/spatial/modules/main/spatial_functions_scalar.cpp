@@ -10,6 +10,7 @@
 
 // DuckDB
 #include "duckdb/common/constants.hpp"
+#include "duckdb/logging/logger.hpp"
 #include "duckdb/common/types/blob.hpp"
 #include "duckdb/common/vector_operations/generic_executor.hpp"
 #include "duckdb/execution/expression_executor.hpp"
