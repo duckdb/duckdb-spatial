@@ -1,10 +1,13 @@
+# name: test/sql/geometry/st_pointn.test
+# group: [geometry]
+
 require spatial
 
 # GEOMETRY tests
 foreach TYPE GEOMETRY LINESTRING_2D
 
 query I
-SELECT st_pointn(ST_GeomFromText('LINESTRING(0 0, 1 1, 2 2, 3 3)')::${TYPE}, 2);
+SELECT st_pointn(ST_GeomFromText('LINESTRING(0 0, 1 1, 2 2, 3 3)')::{TYPE}, 2);
 ----
 POINT (1 1)
 

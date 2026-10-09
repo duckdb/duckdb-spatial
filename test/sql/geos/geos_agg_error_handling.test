@@ -1,0 +1,14 @@
+require spatial
+
+# Test that GEOS aggregate functions properly report errors instead of crashing
+# when encountering invalid geometries. Previously, the GEOS error handler was not
+# registered for aggregate function contexts, causing nullptr dereferences.
+
+# ST_Union_Agg with self-intersecting (bowtie) polygons
+statement error
+SELECT ST_Union_Agg(geom) FROM (VALUES
+  ('POLYGON ((0 0, 10 10, 10 0, 0 10, 0 0))'::geometry),
+  ('POLYGON ((20 20, 30 30, 30 20, 20 30, 20 20))'::geometry)
+) AS t(geom);
+----
+Invalid Input Error

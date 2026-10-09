@@ -5,7 +5,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(TARGET_NAME spatial)
 set(EXTENSION_NAME ${TARGET_NAME}_extension)
 set(CMAKE_CXX_STANDARD
-    11
+    17
     CACHE STRING "C++ standard")
 
 if(EMSCRIPTEN)

@@ -1,9 +1,12 @@
+#include "duckdb/common/vector/map_vector.hpp"
+#include "duckdb/common/vector/struct_vector.hpp"
 #include "spatial/spatial_types.hpp"
 #include "spatial/index/rtree/rtree_index.hpp"
 #include "spatial/index/rtree/rtree_module.hpp"
 #include "spatial/index/rtree/rtree_node.hpp"
 #include "spatial/index/rtree/rtree_scanner.hpp"
 
+#include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/duck_index_entry.hpp"
 #include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
 #include "duckdb/catalog/dependency_list.hpp"
@@ -11,10 +14,12 @@
 #include "duckdb/function/function_set.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/optimizer/matcher/expression_matcher.hpp"
+#include "duckdb/planner/binder.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/storage/data_table.hpp"
 #include "duckdb/storage/table/scan_state.hpp"
+#include "duckdb/storage/table/table_index_list.hpp"
 #include "duckdb/transaction/duck_transaction.hpp"
 #include "duckdb/transaction/local_storage.hpp"
 
@@ -22,7 +27,7 @@ namespace duckdb {
 
 // BIND
 static unique_ptr<FunctionData> RTreeindexInfoBind(ClientContext &context, TableFunctionBindInput &input,
-                                                   vector<LogicalType> &return_types, vector<string> &names) {
+                                                   vector<LogicalType> &return_types, vector<Identifier> &names) {
 	names.emplace_back("catalog_name");
 	return_types.emplace_back(LogicalType::VARCHAR);
 
@@ -70,68 +75,66 @@ static void RTreeIndexInfoExecute(ClientContext &context, TableFunctionInput &da
 	idx_t row = 0;
 	while (data.offset < data.entries.size() && row < STANDARD_VECTOR_SIZE) {
 		auto &index_entry = data.entries[data.offset++].get();
-		auto &table_entry = index_entry.schema.catalog.GetEntry<TableCatalogEntry>(context, index_entry.GetSchemaName(),
-		                                                                           index_entry.GetTableName());
+		auto &table_entry = index_entry.schema.catalog.GetEntry<TableCatalogEntry>(
+		    context, QualifiedName(index_entry.schema.catalog.GetName(), index_entry.GetSchemaName(),
+		                           index_entry.GetTableName()));
 		auto &storage = table_entry.GetStorage();
-		RTreeIndex *rtree_index = nullptr;
+		bool found_index = false;
 
 		auto &table_info = *storage.GetDataTableInfo();
 		table_info.BindIndexes(context, RTreeIndex::TYPE_NAME);
-		for (auto &index : table_info.GetIndexes().Indexes()) {
-			if (!index.IsBound() || RTreeIndex::TYPE_NAME != index.GetIndexType()) {
+		for (auto entry : table_info.GetIndexes().IndexEntries()) {
+			if (entry->GetBindState() != IndexBindState::BOUND || RTreeIndex::TYPE_NAME != entry->GetIndexType()) {
 				continue;
 			}
-			auto &rtree = index.Cast<RTreeIndex>();
-			if (rtree.name == index_entry.name) {
-				rtree_index = &rtree;
+			if (entry->GetName() == index_entry.name) {
+				found_index = true;
 				break;
 			}
 		};
 
-		if (!rtree_index) {
+		if (!found_index) {
 			throw BinderException("Index %s not found", index_entry.name);
 		}
 
 		idx_t col = 0;
 
 		output.data[col++].SetValue(row, Value(index_entry.catalog.GetName()));
-		output.data[col++].SetValue(row, Value(index_entry.schema.name));
-		output.data[col++].SetValue(row, Value(index_entry.name));
-		output.data[col++].SetValue(row, Value(table_entry.name));
+		output.data[col++].SetValue(row, Value(index_entry.schema.name.GetIdentifierName()));
+		output.data[col++].SetValue(row, Value(index_entry.name.GetIdentifierName()));
+		output.data[col++].SetValue(row, Value(table_entry.name.GetIdentifierName()));
 
 		row++;
 	}
-	output.SetCardinality(row);
+	output.SetChildCardinality(row);
 }
 
-static optional_ptr<RTreeIndex> TryGetIndex(ClientContext &context, const string &index_name) {
+static shared_ptr<IndexEntry> TryGetIndex(ClientContext &context, const string &index_name) {
 	auto qname = QualifiedName::Parse(index_name);
 
 	// look up the index name in the catalog
-	Binder::BindSchemaOrCatalog(context, qname.catalog, qname.schema);
-	auto &index_entry = Catalog::GetEntry(context, CatalogType::INDEX_ENTRY, qname.catalog, qname.schema, qname.name)
-	                        .Cast<IndexCatalogEntry>();
-	auto &table_entry = Catalog::GetEntry(context, CatalogType::TABLE_ENTRY, qname.catalog, index_entry.GetSchemaName(),
-	                                      index_entry.GetTableName())
+	Binder::BindSchemaOrCatalog(context, qname);
+	auto &index_entry =
+	    Catalog::GetEntry(context, CatalogType::INDEX_ENTRY, qname.Catalog(), qname.Schema(), qname.Name())
+	        .Cast<IndexCatalogEntry>();
+	auto &table_entry = Catalog::GetEntry(context, CatalogType::TABLE_ENTRY, qname.Catalog(),
+	                                      index_entry.GetSchemaName(), index_entry.GetTableName())
 	                        .Cast<TableCatalogEntry>();
 
 	auto &storage = table_entry.GetStorage();
-	RTreeIndex *rtree_index = nullptr;
 
 	auto &table_info = *storage.GetDataTableInfo();
 	table_info.BindIndexes(context, RTreeIndex::TYPE_NAME);
-	for (auto &index : table_info.GetIndexes().Indexes()) {
-		if (!index.IsBound() || RTreeIndex::TYPE_NAME != index.GetIndexType()) {
+	for (auto entry : table_info.GetIndexes().IndexEntries()) {
+		if (entry->GetBindState() != IndexBindState::BOUND || RTreeIndex::TYPE_NAME != entry->GetIndexType()) {
 			continue;
 		}
-		auto &rtree = index.Cast<RTreeIndex>();
-		if (index_entry.name == index_name) {
-			rtree_index = &rtree;
-			break;
+		if (entry->GetName() == index_entry.name) {
+			return entry;
 		}
 	};
 
-	return rtree_index;
+	return nullptr;
 }
 
 //-------------------------------------------------------------------------
@@ -143,7 +146,7 @@ struct RTreeIndexDumpBindData final : public TableFunctionData {
 };
 
 static unique_ptr<FunctionData> RTreeIndexDumpBind(ClientContext &context, TableFunctionBindInput &input,
-                                                   vector<LogicalType> &return_types, vector<string> &names) {
+                                                   vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = make_uniq<RTreeIndexDumpBindData>();
 
 	result->index_name = input.inputs[0].GetValue<string>();
@@ -171,24 +174,24 @@ struct RTreeIndexDumpStackFrame {
 };
 
 struct RTreeIndexDumpState final : public GlobalTableFunctionState {
-	const RTreeIndex &index;
+	IndexReadHandle<RTreeIndex> index_handle;
 	RTreeScanner scanner;
 
 public:
-	explicit RTreeIndexDumpState(const RTreeIndex &index) : index(index) {
+	explicit RTreeIndexDumpState(IndexReadHandle<RTreeIndex> index_handle_p) : index_handle(std::move(index_handle_p)) {
 	}
 };
 
 static unique_ptr<GlobalTableFunctionState> RTreeIndexDumpInit(ClientContext &context, TableFunctionInitInput &input) {
 	auto &bind_data = input.bind_data->Cast<RTreeIndexDumpBindData>();
 
-	auto rtree_index = TryGetIndex(context, bind_data.index_name);
-	if (!rtree_index) {
+	auto index_entry = TryGetIndex(context, bind_data.index_name);
+	if (!index_entry) {
 		throw BinderException("Index %s not found", bind_data.index_name);
 	}
 
-	auto result = make_uniq<RTreeIndexDumpState>(*rtree_index);
-	const auto &root_entry = rtree_index->tree->GetRoot();
+	auto result = make_uniq<RTreeIndexDumpState>(index_entry->GetReadHandle<RTreeIndex>());
+	const auto &root_entry = result->index_handle->tree->GetRoot();
 
 	if (root_entry.pointer.IsSet()) {
 		result->scanner.Init(root_entry);
@@ -202,15 +205,15 @@ static void RTreeIndexDumpExecute(ClientContext &context, TableFunctionInput &da
 
 	idx_t output_idx = 0;
 
-	const auto level_data = FlatVector::GetData<int32_t>(output.data[0]);
-	const auto &bounds_vectors = StructVector::GetEntries(output.data[1]);
-	const auto xmin_data = FlatVector::GetData<float>(*bounds_vectors[0]);
-	const auto ymin_data = FlatVector::GetData<float>(*bounds_vectors[1]);
-	const auto xmax_data = FlatVector::GetData<float>(*bounds_vectors[2]);
-	const auto ymax_data = FlatVector::GetData<float>(*bounds_vectors[3]);
-	const auto rowid_data = FlatVector::GetData<row_t>(output.data[2]);
+	auto level_data = FlatVector::GetDataMutable<int32_t>(output.data[0]);
+	auto &bounds_vectors = StructVector::GetEntries(output.data[1]);
+	auto xmin_data = FlatVector::GetDataMutable<float>(bounds_vectors[0]);
+	auto ymin_data = FlatVector::GetDataMutable<float>(bounds_vectors[1]);
+	auto xmax_data = FlatVector::GetDataMutable<float>(bounds_vectors[2]);
+	auto ymax_data = FlatVector::GetDataMutable<float>(bounds_vectors[3]);
+	auto rowid_data = FlatVector::GetDataMutable<row_t>(output.data[2]);
 
-	const auto &tree = *state.index.tree;
+	const auto &tree = *state.index_handle->tree;
 
 	state.scanner.Scan(tree, [&](const RTreeEntry &entry, const idx_t &level) {
 		level_data[output_idx] = UnsafeNumericCast<int32_t>(level);
@@ -231,7 +234,11 @@ static void RTreeIndexDumpExecute(ClientContext &context, TableFunctionInput &da
 		return RTreeScanResult::CONTINUE;
 	});
 
-	output.SetCardinality(output_idx);
+	FlatVector::SetSize(bounds_vectors[0], count_t(output_idx));
+	FlatVector::SetSize(bounds_vectors[1], count_t(output_idx));
+	FlatVector::SetSize(bounds_vectors[2], count_t(output_idx));
+	FlatVector::SetSize(bounds_vectors[3], count_t(output_idx));
+	output.SetChildCardinality(output_idx);
 }
 
 //-------------------------------------------------------------------------
@@ -244,8 +251,9 @@ void RTreeModule::RegisterIndexPragmas(ExtensionLoader &loader) {
 
 	loader.RegisterFunction(info_function);
 
-	TableFunction dump_function("rtree_index_dump", {LogicalType::VARCHAR}, RTreeIndexDumpExecute, RTreeIndexDumpBind,
-	                            RTreeIndexDumpInit);
+	TableFunction dump_function("rtree_index_dump",
+	                            FunctionSignature().AddPositionalOnly("index_name", LogicalType::VARCHAR),
+	                            RTreeIndexDumpExecute, RTreeIndexDumpBind, RTreeIndexDumpInit);
 
 	loader.RegisterFunction(dump_function);
 }

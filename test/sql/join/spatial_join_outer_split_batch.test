@@ -1,0 +1,107 @@
+# name: test/sql/join/spatial_join_outer_split_batch.test
+# group: [join]
+
+# Regression test for https://github.com/duckdb/duckdb-spatial/issues/871
+#
+# A LEFT JOIN with a spatial predicate returned fewer rows than the left table. The optimizer flips a
+# LEFT join with a cheaper left side into a RIGHT join, so the preserved side becomes the build side and
+# unmatched rows are emitted by the right-outer phase. That phase relies on a per-row "matched" flag that
+# the probe phase sets through build-side row pointers. When a single probe row's R-tree candidate batch
+# was split across two output chunks, the pointers for the second part were read from the *start* of the
+# batch instead of from the current offset, so the wrong build rows were marked.
+
+require spatial
+
+statement ok
+SET profiling_renderer_settings = MAP {'operator_casing': 'upper'};
+
+statement ok
+PRAGMA threads=4;
+
+# Build side: 50x50 grid of points, ids 0..2499
+statement ok
+CREATE TABLE pts AS
+SELECT ST_Point(x, y) AS geom, x * 50 + y AS id
+FROM range(50) r1(x), range(50) r2(y);
+
+# Probe side: three triangles anchored at (49, 49), with 64, 441 and 2500 bounding-box candidates each.
+# The 2500-candidate batch starts at output offset 505, so it is split at the 2048 boundary.
+statement ok
+CREATE TABLE tris (id INTEGER, geom GEOMETRY);
+
+statement ok
+INSERT INTO tris VALUES
+    (7,  'POLYGON((49 49, 42 49, 49 42, 49 49))'),
+    (20, 'POLYGON((49 49, 29 49, 49 29, 49 49))'),
+    (49, 'POLYGON((49 49, 0 49, 49 0, 49 49))');
+
+# Pad the probe side with NULL geometries so that it is the more expensive side to build on.
+# This makes the optimizer flip "pts LEFT JOIN tris" into "tris RIGHT JOIN pts", with pts as the build side.
+statement ok
+INSERT INTO tris SELECT 1000 + i, NULL FROM range(5000) r(i);
+
+# Expected counts (triangle of size s contains (s+1)(s+2)/2 grid points):
+#   matches:      36 + 231 + 1275 = 1542
+#   unmatched pts: 2500 - 1275    = 1225
+
+#-----------------------------------------------------------------------------------------------------------------------
+# Reference results using the blockwise NL join
+#-----------------------------------------------------------------------------------------------------------------------
+statement ok
+PRAGMA disabled_optimizers='extension';
+
+query II
+EXPLAIN SELECT p.id, t.id FROM pts p LEFT JOIN tris t ON ST_Intersects(p.geom, t.geom);
+----
+physical_plan	<REGEX>:.*BLOCKWISE_NL_JOIN.*
+
+query II rowsort left_join_res
+SELECT p.id, t.id FROM pts p LEFT JOIN tris t ON ST_Intersects(p.geom, t.geom);
+----
+
+query II rowsort right_join_res
+SELECT p.id, t.id FROM tris t RIGHT JOIN pts p ON ST_Intersects(t.geom, p.geom);
+----
+
+query II rowsort full_join_res
+SELECT p.id, t.id FROM pts p FULL OUTER JOIN tris t ON ST_Intersects(p.geom, t.geom);
+----
+
+#-----------------------------------------------------------------------------------------------------------------------
+# Now with the spatial join
+#-----------------------------------------------------------------------------------------------------------------------
+statement ok
+PRAGMA disabled_optimizers='';
+
+# The LEFT join is flipped into a RIGHT spatial join, with pts on the build side
+query II
+EXPLAIN SELECT p.id, t.id FROM pts p LEFT JOIN tris t ON ST_Intersects(p.geom, t.geom);
+----
+physical_plan	<REGEX>:.*SPATIAL_JOIN.*Join Type: RIGHT.*
+
+# Every row of the left table must be preserved exactly once when it has no match
+query III
+SELECT count(*), count(*) FILTER (WHERE t.id IS NULL), count(DISTINCT p.id)
+FROM pts p LEFT JOIN tris t ON ST_Intersects(p.geom, t.geom);
+----
+2767	1225	2500
+
+query II rowsort left_join_res
+SELECT p.id, t.id FROM pts p LEFT JOIN tris t ON ST_Intersects(p.geom, t.geom);
+----
+
+query II rowsort right_join_res
+SELECT p.id, t.id FROM tris t RIGHT JOIN pts p ON ST_Intersects(t.geom, p.geom);
+----
+
+query II rowsort full_join_res
+SELECT p.id, t.id FROM pts p FULL OUTER JOIN tris t ON ST_Intersects(p.geom, t.geom);
+----
+
+# The shape from the issue: LEFT JOIN + GROUP BY ALL must keep every left row
+query I
+SELECT count(*) FROM (
+    SELECT p.* FROM pts p LEFT JOIN tris t ON ST_Intersects(p.geom, t.geom) GROUP BY ALL
+);
+----
+2500

@@ -4,6 +4,7 @@
 #include "spatial/spatial_types.hpp"
 
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
+#include "duckdb/execution/index/index_type.hpp"
 #include "duckdb/execution/column_binding_resolver.hpp"
 #include "duckdb/execution/operator/filter/physical_filter.hpp"
 #include "duckdb/execution/operator/order/physical_order.hpp"
@@ -32,7 +33,7 @@ void LogicalCreateRTreeIndex::ResolveTypes() {
 }
 
 void LogicalCreateRTreeIndex::ResolveColumnBindings(ColumnBindingResolver &res, vector<ColumnBinding> &bindings) {
-	bindings = LogicalOperator::GenerateColumnBindings(0, table.GetColumns().LogicalColumnCount());
+	bindings = LogicalOperator::GenerateColumnBindings(TableIndex(0), table.GetColumns().LogicalColumnCount());
 
 	// Visit the operator's expressions
 	LogicalOperatorVisitor::EnumerateExpressions(*this,
@@ -47,21 +48,21 @@ static PhysicalOperator &CreateNullFilter(PhysicalPlanGenerator &generator, cons
 	auto is_not_null_expr =
 	    make_uniq<BoundOperatorExpression>(ExpressionType::OPERATOR_IS_NOT_NULL, LogicalType::BOOLEAN);
 	auto bound_ref = make_uniq<BoundReferenceExpression>(types[0], 0);
-	is_not_null_expr->children.push_back(bound_ref->Copy());
+	is_not_null_expr->GetChildrenMutable().push_back(bound_ref->Copy());
 
 	// Filter IS_NOT_EMPTY on the GEOMETRY column
 	auto &catalog = Catalog::GetSystemCatalog(context);
-	auto &is_empty_entry = catalog.GetEntry(context, CatalogType::SCALAR_FUNCTION_ENTRY, DEFAULT_SCHEMA, "ST_IsEmpty")
-	                           .Cast<ScalarFunctionCatalogEntry>();
+	auto &is_empty_entry =
+	    catalog.GetEntry(context, CatalogType::SCALAR_FUNCTION_ENTRY, Identifier::DefaultSchema(), "ST_IsEmpty")
+	        .Cast<ScalarFunctionCatalogEntry>();
 
-	auto is_empty_func = is_empty_entry.functions.GetFunctionByArguments(context, {LogicalType::GEOMETRY()});
+	auto is_empty_func = *is_empty_entry.functions.GetFunctionByArguments(context, {LogicalType::GEOMETRY()});
 	vector<unique_ptr<Expression>> is_empty_args;
 	is_empty_args.push_back(std::move(bound_ref));
-	auto is_empty_expr = make_uniq_base<Expression, BoundFunctionExpression>(LogicalType::BOOLEAN, is_empty_func,
-	                                                                         std::move(is_empty_args), nullptr);
+	auto is_empty_expr = is_empty_func.Bind(context, std::move(is_empty_args));
 
 	auto is_not_empty_expr = make_uniq<BoundOperatorExpression>(ExpressionType::OPERATOR_NOT, LogicalType::BOOLEAN);
-	is_not_empty_expr->children.push_back(std::move(is_empty_expr));
+	is_not_empty_expr->GetChildrenMutable().push_back(std::move(is_empty_expr));
 
 	// Combine into an AND
 	auto and_expr = make_uniq_base<Expression, BoundConjunctionExpression>(
@@ -72,21 +73,21 @@ static PhysicalOperator &CreateNullFilter(PhysicalPlanGenerator &generator, cons
 }
 
 static PhysicalOperator &CreateBoundingBoxProjection(PhysicalPlanGenerator &planner, const LogicalOperator &op,
-                                                     const vector<LogicalType> &types, ClientContext &context) {
+                                                     const vector<LogicalType> &types, const LogicalType &geom_type,
+                                                     ClientContext &context) {
 	auto &catalog = Catalog::GetSystemCatalog(context);
 
 	// Get the bounding box function
 	auto &bbox_func_entry =
-	    catalog.GetEntry(context, CatalogType::SCALAR_FUNCTION_ENTRY, DEFAULT_SCHEMA, "ST_Extent_Approx")
+	    catalog.GetEntry(context, CatalogType::SCALAR_FUNCTION_ENTRY, Identifier::DefaultSchema(), "ST_Extent_Approx")
 	        .Cast<ScalarFunctionCatalogEntry>();
-	auto bbox_func = bbox_func_entry.functions.GetFunctionByArguments(context, {LogicalType::GEOMETRY()});
+	const auto &bbox_func = *bbox_func_entry.functions.GetFunctionByArguments(context, {geom_type});
 
-	auto geom_ref_expr = make_uniq_base<Expression, BoundReferenceExpression>(LogicalType::GEOMETRY(), 0);
+	auto geom_ref_expr = make_uniq_base<Expression, BoundReferenceExpression>(geom_type, 0);
 	vector<unique_ptr<Expression>> bbox_args;
 	bbox_args.push_back(std::move(geom_ref_expr));
 
-	auto bbox_expr = make_uniq_base<Expression, BoundFunctionExpression>(GeoTypes::BOX_2DF(), bbox_func,
-	                                                                     std::move(bbox_args), nullptr);
+	auto bbox_expr = bbox_func.Bind(context, std::move(bbox_args));
 
 	// Also project the rowid column
 	auto rowid_expr = make_uniq_base<Expression, BoundReferenceExpression>(LogicalType::ROW_TYPE, 1);
@@ -104,27 +105,27 @@ static PhysicalOperator &CreateOrderByMinX(PhysicalPlanGenerator &planner, const
 
 	// Get the centroid value function
 	auto &centroid_func_entry =
-	    catalog.GetEntry(context, CatalogType::SCALAR_FUNCTION_ENTRY, DEFAULT_SCHEMA, "st_centroid")
+	    catalog.GetEntry(context, CatalogType::SCALAR_FUNCTION_ENTRY, Identifier::DefaultSchema(), "st_centroid")
 	        .Cast<ScalarFunctionCatalogEntry>();
-	auto centroid_func = centroid_func_entry.functions.GetFunctionByArguments(context, {GeoTypes::BOX_2DF()});
+	const auto &centroid_func = *centroid_func_entry.functions.GetFunctionByArguments(context, {GeoTypes::BOX_2DF()});
 	vector<unique_ptr<Expression>> centroid_func_args;
 
 	// Reference the geometry column
 	auto geom_ref_expr = make_uniq_base<Expression, BoundReferenceExpression>(GeoTypes::BOX_2DF(), 0);
 	centroid_func_args.push_back(make_uniq_base<Expression, BoundReferenceExpression>(GeoTypes::BOX_2DF(), 0));
-	auto centroid_expr = make_uniq_base<Expression, BoundFunctionExpression>(GeoTypes::POINT_2D(), centroid_func,
-	                                                                         std::move(centroid_func_args), nullptr);
+
+	auto centroid_expr = centroid_func.Bind(context, std::move(centroid_func_args));
 
 	// Get the xmin value function
-	auto &xmin_func_entry = catalog.GetEntry(context, CatalogType::SCALAR_FUNCTION_ENTRY, DEFAULT_SCHEMA, "st_xmin")
-	                            .Cast<ScalarFunctionCatalogEntry>();
-	auto xmin_func = xmin_func_entry.functions.GetFunctionByArguments(context, {GeoTypes::POINT_2D()});
+	auto &xmin_func_entry =
+	    catalog.GetEntry(context, CatalogType::SCALAR_FUNCTION_ENTRY, Identifier::DefaultSchema(), "st_xmin")
+	        .Cast<ScalarFunctionCatalogEntry>();
+	const auto &xmin_func = *xmin_func_entry.functions.GetFunctionByArguments(context, {GeoTypes::POINT_2D()});
 	vector<unique_ptr<Expression>> xmin_func_args;
 
 	// Reference the centroid
 	xmin_func_args.push_back(std::move(centroid_expr));
-	auto xmin_expr = make_uniq_base<Expression, BoundFunctionExpression>(LogicalType::DOUBLE, xmin_func,
-	                                                                     std::move(xmin_func_args), nullptr);
+	auto xmin_expr = xmin_func.Bind(context, std::move(xmin_func_args));
 
 	vector<BoundOrderByNode> orders;
 	orders.emplace_back(OrderType::ASCENDING, OrderByNullType::NULLS_FIRST, std::move(xmin_expr));
@@ -150,8 +151,8 @@ PhysicalOperator &RTreeIndex::CreatePlan(PlanIndexInput &input) {
 
 	auto &expr = op.unbound_expressions[0];
 
-	// Validate that we have the right type of expression (float array)
-	if (expr->return_type != LogicalType::GEOMETRY()) {
+	// Validate that we have the right type of expression (also allow GEOMETRY types with a CRS)
+	if (expr->GetReturnType().id() != LogicalTypeId::GEOMETRY) {
 		throw BinderException("RTree indexes can only be created over GEOMETRY columns.");
 	}
 
@@ -167,7 +168,7 @@ PhysicalOperator &RTreeIndex::CreatePlan(PlanIndexInput &input) {
 
 	// Add the geometry expression to the select list
 	auto geom_expr = op.expressions[0]->Copy();
-	new_column_types.push_back(geom_expr->return_type);
+	new_column_types.push_back(geom_expr->GetReturnType());
 	select_list.push_back(std::move(geom_expr));
 
 	// Add the row ID to the select list
@@ -185,7 +186,7 @@ PhysicalOperator &RTreeIndex::CreatePlan(PlanIndexInput &input) {
 
 	// Project the bounding box and the row ID
 	vector<LogicalType> projected_types = {GeoTypes::BOX_2DF(), LogicalType::ROW_TYPE};
-	auto &bbox_proj = CreateBoundingBoxProjection(planner, op, projected_types, context);
+	auto &bbox_proj = CreateBoundingBoxProjection(planner, op, projected_types, new_column_types[0], context);
 	bbox_proj.children.push_back(null_filter);
 
 	// Create an ORDER_BY operator to sort the bounding boxes by the xmin value
@@ -217,8 +218,8 @@ PhysicalOperator &LogicalCreateRTreeIndex::CreatePlan(ClientContext &context, Ph
 
 	auto &expr = op.unbound_expressions[0];
 
-	// Validate that we have the right type of expression (float array)
-	if (expr->return_type != LogicalType::GEOMETRY()) {
+	// Validate that we have the right type of expression (also allow GEOMETRY types with a CRS)
+	if (expr->GetReturnType().id() != LogicalTypeId::GEOMETRY) {
 		throw BinderException("RTree indexes can only be created over GEOMETRY columns.");
 	}
 
@@ -244,7 +245,7 @@ PhysicalOperator &LogicalCreateRTreeIndex::CreatePlan(ClientContext &context, Ph
 
 	// Add the geometry expression to the select list
 	auto geom_expr = op.expressions[0]->Copy();
-	new_column_types.push_back(geom_expr->return_type);
+	new_column_types.push_back(geom_expr->GetReturnType());
 	select_list.push_back(std::move(geom_expr));
 
 	// Add the row ID to the select list
@@ -262,7 +263,7 @@ PhysicalOperator &LogicalCreateRTreeIndex::CreatePlan(ClientContext &context, Ph
 
 	// Project the bounding box and the row ID
 	vector<LogicalType> projected_types = {GeoTypes::BOX_2DF(), LogicalType::ROW_TYPE};
-	auto &bbox_proj = CreateBoundingBoxProjection(planner, op, projected_types, context);
+	auto &bbox_proj = CreateBoundingBoxProjection(planner, op, projected_types, new_column_types[0], context);
 	bbox_proj.children.push_back(null_filter);
 
 	// Create an ORDER_BY operator to sort the bounding boxes by the xmin value
@@ -293,10 +294,10 @@ unique_ptr<LogicalExtensionOperator> LogicalCreateRTreeIndex::Deserialize(Deseri
 
 	// We also need to rebind the table
 	auto &context = reader.Get<ClientContext &>();
-	const auto &catalog = info->catalog;
-	const auto &schema = info->schema;
+	const auto &catalog = info->GetQualifiedName().Catalog();
+	const auto &schema = info->GetQualifiedName().Schema();
 	const auto &table_name = info->table;
-	auto &table_entry = Catalog::GetEntry<TableCatalogEntry>(context, catalog, schema, table_name);
+	auto &table_entry = Catalog::GetEntry<TableCatalogEntry>(context, QualifiedName(catalog, schema, table_name));
 
 	// Return the new operator
 	return make_uniq_base<LogicalExtensionOperator, LogicalCreateRTreeIndex>(

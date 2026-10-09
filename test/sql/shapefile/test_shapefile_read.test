@@ -1,16 +1,19 @@
+# name: test/sql/shapefile/test_shapefile_read.test
+# group: [shapefile]
+
 require spatial
 
 # Test that we can round-trip by writing from GDAL and reading back in
 
 statement ok
 COPY (
-    SELECT * FROM st_read('__WORKING_DIRECTORY__/test/data/world-administrative-boundaries.geojson')
-) TO '__TEST_DIR__/world_admin.shp' (FORMAT 'GDAL', DRIVER 'ESRI Shapefile');
+    SELECT * FROM st_read('{WORKING_DIRECTORY}/test/data/world-administrative-boundaries.geojson')
+) TO '{TEST_DIR}/world_admin.shp' (FORMAT 'GDAL', DRIVER 'ESRI Shapefile');
 
 query III rowsort expected_result
-SELECT name, st_area(geom), st_geometrytype(geom) FROM st_read('__TEST_DIR__/world_admin.shp');
+SELECT name, st_area(geom), st_geometrytype(geom) FROM st_read('{TEST_DIR}/world_admin.shp');
 ----
 
 query III rowsort expected_result
-SELECT name, st_area(geom), st_geometrytype(geom) FROM st_readshp('__TEST_DIR__/world_admin.shp');
+SELECT name, st_area(geom), st_geometrytype(geom) FROM st_readshp('{TEST_DIR}/world_admin.shp');
 ----

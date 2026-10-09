@@ -1,27 +1,30 @@
+# name: test/sql/gdal/st_read_order.test
+# group: [gdal]
+
 require spatial
 
 # Test that the projection order (i.e. order of columns) dont break anything
 query II
-SELECT kind, geom FROM st_read('__WORKING_DIRECTORY__/test/data/amsterdam_roads.fgb') LIMIT 1;
+SELECT kind, geom FROM st_read('{WORKING_DIRECTORY}/test/data/amsterdam_roads.fgb') LIMIT 1;
 ----
 service	LINESTRING (554203.4169973677 6859025.689313544, 554196.0031192809 6859038.14744868)
 
 query II
-SELECT geom, kind FROM st_read('__WORKING_DIRECTORY__/test/data/amsterdam_roads.fgb') LIMIT 1;
+SELECT geom, kind FROM st_read('{WORKING_DIRECTORY}/test/data/amsterdam_roads.fgb') LIMIT 1;
 ----
 LINESTRING (554203.4169973677 6859025.689313544, 554196.0031192809 6859038.14744868)	service
 
 query I
-SELECT geom FROM st_read('__WORKING_DIRECTORY__/test/data/amsterdam_roads.fgb') LIMIT 1;
+SELECT geom FROM st_read('{WORKING_DIRECTORY}/test/data/amsterdam_roads.fgb') LIMIT 1;
 ----
 LINESTRING (554203.4169973677 6859025.689313544, 554196.0031192809 6859038.14744868)
 
 query I
-SELECT kind FROM st_read('__WORKING_DIRECTORY__/test/data/amsterdam_roads.fgb') LIMIT 1;
+SELECT kind FROM st_read('{WORKING_DIRECTORY}/test/data/amsterdam_roads.fgb') LIMIT 1;
 ----
 service
 
 query III
-SELECT kind, geom, kind FROM st_read('__WORKING_DIRECTORY__/test/data/amsterdam_roads.fgb') LIMIT 1;
+SELECT kind, geom, kind FROM st_read('{WORKING_DIRECTORY}/test/data/amsterdam_roads.fgb') LIMIT 1;
 ----
 service	LINESTRING (554203.4169973677 6859025.689313544, 554196.0031192809 6859038.14744868)	service

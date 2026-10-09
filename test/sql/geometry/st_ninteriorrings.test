@@ -1,19 +1,22 @@
+# name: test/sql/geometry/st_ninteriorrings.test
+# group: [geometry]
+
 require spatial
 
 foreach TYPE GEOMETRY POLYGON_2D
 
 query I
-SELECT st_ninteriorrings(ST_GeomFromText('POLYGON((0 0, 0 1, 1 1, 1 0, 0 0))')::${TYPE});
+SELECT st_ninteriorrings(ST_GeomFromText('POLYGON((0 0, 0 1, 1 1, 1 0, 0 0))')::{TYPE});
 ----
 0
 
 query I
-SELECT st_ninteriorrings(ST_GeomFromText('POLYGON EMPTY')::${TYPE});
+SELECT st_ninteriorrings(ST_GeomFromText('POLYGON EMPTY')::{TYPE});
 ----
 0
 
 query I
-SELECT st_ninteriorrings(ST_GeomFromText('POLYGON((0 0, 0 1, 1 1, 1 0, 0 0), (0.25 0.25, 0.25 0.75, 0.75 0.75, 0.75 0.25, 0.25 0.25))')::${TYPE});
+SELECT st_ninteriorrings(ST_GeomFromText('POLYGON((0 0, 0 1, 1 1, 1 0, 0 0), (0.25 0.25, 0.25 0.75, 0.75 0.75, 0.75 0.25, 0.25 0.25))')::{TYPE});
 ----
 1
 

@@ -1,7 +1,13 @@
+# name: test/sql/index/rtree_persistence.test_slow
+# group: [index]
+
 require spatial
 
 # Create a persistent database
-load __TEST_DIR__/rtree_persistence_test.db
+load {TEST_DIR}/rtree_persistence_test.db
+
+statement ok
+SET profiling_renderer_settings = MAP {'operator_casing': 'upper'};
 
 statement ok
 CREATE TABLE t1 AS SELECT point::GEOMETRY as geom
@@ -21,6 +27,9 @@ EXPLAIN SELECT count(*) FROM t1 WHERE ST_Within(geom, ST_MakeEnvelope(450, 450, 
 physical_plan	<REGEX>:.*RTREE_INDEX_SCAN.*
 
 restart
+
+statement ok
+SET profiling_renderer_settings = MAP {'operator_casing': 'upper'};
 
 # We should still have the index
 query II

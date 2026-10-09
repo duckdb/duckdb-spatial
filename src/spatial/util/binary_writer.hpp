@@ -39,6 +39,14 @@ public:
 	}
 
 	void Copy(const char *buffer, const size_t size) {
+		if (buffer == nullptr) {
+			D_ASSERT(size == 0);
+			return;
+		}
+		if (size == 0) {
+			return;
+		}
+
 		CheckSize(size);
 		memcpy(ptr, buffer, size);
 		ptr += size;

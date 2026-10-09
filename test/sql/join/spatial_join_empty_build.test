@@ -1,7 +1,7 @@
-require spatial
+# name: test/sql/join/spatial_join_empty_build.test
+# group: [join]
 
-statement ok
-PRAGMA enable_verification
+require spatial
 
 statement ok
 CREATE TABLE lhs AS

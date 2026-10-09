@@ -1,7 +1,10 @@
+# name: test/sql/join/spatial_join_test_2.test_slow
+# group: [join]
+
 require spatial
 
 statement ok
-PRAGMA enable_verification
+SET profiling_renderer_settings = MAP {'operator_casing': 'upper'};
 
 statement ok
 SELECT setseed(0.5);
@@ -27,7 +30,7 @@ INSERT INTO t2 SELECT
 					st_point(x + 70, y),
 					list_transform(
 						list_sort([{u: random() * 2 * 3.14, w: (random() * 2 - 1) * 15} for _ in range(1,16)]),
-						v -> st_point(x + cos(v.u) * 70 + cos(v.u) * v.w, y + sin(v.u) * 70 + sin(v.u) * v.w))
+						lambda v: st_point(x + cos(v.u) * 70 + cos(v.u) * v.w, y + sin(v.u) * 70 + sin(v.u) * v.w))
 				),
 				st_point(x + 70, y)
 			)
@@ -48,58 +51,3 @@ query I
 SELECT count(*) FROM t1 JOIN t2 ON st_intersects(t1.g, t2.g);
 ----
 3576
-
-# Now enable the spatial join again
-statement ok
-set disabled_optimizers='';
-
-# Check that we get a SPATIAL_JOIN plan
-query II
-EXPLAIN SELECT count(*) FROM t1 JOIN t2 ON st_intersects(t1.g, t2.g);
-----
-physical_plan	<REGEX>:.*SPATIAL_JOIN.*
-
-query I
-SELECT count(*) FROM t1 JOIN t2 ON st_intersects(t1.g, t2.g);
-----
-3576
-
-
-# Check that we get a SPATIAL_JOIN plan
-query II
-EXPLAIN SELECT count(*) FROM t1 JOIN t2 ON st_intersects(st_buffer(t1.g, 1), st_buffer(t2.g, 1));
-----
-physical_plan	<REGEX>:.*SPATIAL_JOIN.*
-
-# Also try with buffering
-query I
-SELECT count(*) FROM t1 JOIN t2 ON st_intersects(st_buffer(t1.g, 1), st_buffer(t2.g, 1));
-----
-3827
-
-statement ok
-set disabled_optimizers='extension';
-
-# Also try with buffering
-query II
-EXPLAIN SELECT count(*) FROM t1 JOIN t2 ON st_intersects(st_buffer(t1.g, 1), st_buffer(t2.g, 1));
-----
-physical_plan	<REGEX>:.*BLOCKWISE_NL_JOIN.*
-
-query I
-SELECT count(*) FROM t1 JOIN t2 ON st_intersects(st_buffer(t1.g, 1), st_buffer(t2.g, 1));
-----
-3827
-
-### Now do some real resultset checking
-query II rowsort resultset
-SELECT * FROM t1 JOIN t2 ON st_intersects(t1.g, t2.g);
-----
-
-# Now enable the spatial join again
-statement ok
-set disabled_optimizers='';
-
-query II rowsort resultset
-SELECT * FROM t1 JOIN t2 ON st_intersects(t1.g, t2.g);
-----

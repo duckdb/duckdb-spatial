@@ -7,6 +7,7 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/types/geometry.hpp"
 #include "duckdb/common/types/string_type.hpp"
+#include "duckdb/common/types/value.hpp"
 #include "duckdb/storage/arena_allocator.hpp"
 
 namespace duckdb {
@@ -167,6 +168,9 @@ void Prepare<sgl::prepared_geometry>(sgl::prepared_geometry &type, ArenaAllocato
 
 template <class GEOM_TYPE = sgl::geometry>
 static void DeserializeInternal(GEOM_TYPE &result, ArenaAllocator &arena, const char *buffer, size_t buffer_size) {
+	if (buffer_size == 0) {
+		throw InvalidInputException("Unexpected end of binary data at position 0");
+	}
 	BinaryReader reader(buffer, buffer_size);
 
 	uint32_t stack[32];
@@ -300,6 +304,14 @@ uint32_t Serde::TryGetBounds(const string_t &blob, Box2D<float> &bbox) {
 	bbox.max.x = MathUtil::DoubleToFloatUp(extent.x_max);
 	bbox.max.y = MathUtil::DoubleToFloatUp(extent.y_max);
 	return count;
+}
+
+bool Serde::TryGetBounds(const Value &value, Box2D<float> &bbox) {
+	if (value.IsNull()) {
+		return false;
+	}
+	const auto &blob = StringValue::Get(value);
+	return TryGetBounds(string_t(blob.data(), static_cast<uint32_t>(blob.size())), bbox) != 0;
 }
 
 } // namespace duckdb

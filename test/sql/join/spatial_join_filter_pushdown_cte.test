@@ -1,0 +1,25 @@
+# name: test/sql/join/spatial_join_filter_pushdown_cte.test
+# group: [join]
+
+require spatial
+
+statement ok
+CREATE TABLE probe AS
+SELECT x, ST_Point(x, 0) AS geom
+FROM (VALUES (0), (100), (200)) v(x);
+
+# The build-side bounding box changes each recursive iteration. Dynamic filters
+# pushed by the spatial join must be cleared before the next execution of the
+# same physical operator, otherwise the probe scan is filtered by stale bounds.
+query I
+WITH RECURSIVE r(i, geom) AS (
+	SELECT 0, ST_Point(0, 0)
+	UNION ALL
+	SELECT r.i + 1, p.geom
+	FROM probe p, r
+	WHERE r.i < 2
+	  AND ST_Intersects(p.geom, ST_Point((r.i + 1) * 100, 0))
+)
+SELECT count(*) FROM r;
+----
+3

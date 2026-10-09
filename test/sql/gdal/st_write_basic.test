@@ -1,15 +1,18 @@
+# name: test/sql/gdal/st_write_basic.test
+# group: [gdal]
+
 require spatial
 
 statement ok
 COPY (SELECT ST_GeomFromText('POINT (1 1)'))
-TO '__TEST_DIR__/test_seq.json'
+TO '{TEST_DIR}/test_seq.json'
 WITH (FORMAT GDAL, DRIVER 'GeoJSONSeq');
 
 statement ok
 COPY (SELECT ST_GeomFromText('POINT (1 1)'))
-TO '__TEST_DIR__/test_seq.shp'
+TO '{TEST_DIR}/test_seq.shp'
 WITH (FORMAT GDAL, DRIVER 'ESRI ShapeFile');
 
 # MVT is broken due to threading issues
 #statement ok
-#COPY (SELECT ST_GeomFromText('POINT (1 1)'))  TO '__TEST_DIR__/test_mvt.mvt'  WITH (FORMAT GDAL, DRIVER 'MVT');
+#COPY (SELECT ST_GeomFromText('POINT (1 1)'))  TO '{TEST_DIR}/test_mvt.mvt'  WITH (FORMAT GDAL, DRIVER 'MVT');

@@ -3,6 +3,8 @@
 
 require spatial
 
+require json
+
 # Geometry
 statement ok
 CREATE TABLE types (geom GEOMETRY);
@@ -114,5 +116,5 @@ SELECT ST_AsGeoJSON('LINESTRING ZM (1 2 3 4, 4 5 6 7)');
 statement error
 select st_geomfromgeojson('null');
 ----
-Could not parse GeoJSON input: Not a valid JSON object, (null)
+Invalid GeoJSON: geometry must be an object
 

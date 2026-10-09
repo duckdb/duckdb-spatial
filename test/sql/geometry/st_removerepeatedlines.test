@@ -1,3 +1,6 @@
+# name: test/sql/geometry/st_removerepeatedlines.test
+# group: [geometry]
+
 require spatial
 
 foreach kind LINESTRING_2D GEOMETRY
@@ -11,52 +14,52 @@ LINESTRING (1 1, 1 1)
 
 # Remove points in the middle
 query I
-SELECT ST_AsText(ST_RemoveRepeatedPoints(ST_GeomFromText('LINESTRING (1 1, 2 2, 2 2, 3 3)')::${kind}));
+SELECT ST_AsText(ST_RemoveRepeatedPoints(ST_GeomFromText('LINESTRING (1 1, 2 2, 2 2, 3 3)')::{kind}));
 ----
 LINESTRING (1 1, 2 2, 3 3)
 
 query I
-SELECT ST_AsText(ST_RemoveRepeatedPoints(ST_GeomFromText('LINESTRING (1 1, 2 2, 2 2, 2 2, 4 4, 4 4, 3 3)')::${kind}));
+SELECT ST_AsText(ST_RemoveRepeatedPoints(ST_GeomFromText('LINESTRING (1 1, 2 2, 2 2, 2 2, 4 4, 4 4, 3 3)')::{kind}));
 ----
 LINESTRING (1 1, 2 2, 4 4, 3 3)
 
 # Remove points in the front
 query I
-SELECT ST_AsText(ST_RemoveRepeatedPoints(ST_GeomFromText('LINESTRING (1 1, 1 1, 2 2, 3 3)')::${kind}));
+SELECT ST_AsText(ST_RemoveRepeatedPoints(ST_GeomFromText('LINESTRING (1 1, 1 1, 2 2, 3 3)')::{kind}));
 ----
 LINESTRING (1 1, 2 2, 3 3)
 
 # Remove points from the back
 query I
-SELECT ST_AsText(ST_RemoveRepeatedPoints(ST_GeomFromText('LINESTRING (1 1, 2 2, 3 3, 3 3)')::${kind}));
+SELECT ST_AsText(ST_RemoveRepeatedPoints(ST_GeomFromText('LINESTRING (1 1, 2 2, 3 3, 3 3)')::{kind}));
 ----
 LINESTRING (1 1, 2 2, 3 3)
 
 
 # With tolerance
 query I
-SELECT ST_AsText(ST_RemoveRepeatedPoints(ST_GeomFromText('LINESTRING (2 2, 1 1, 5 5, 1 1, 0 0, 0 0)')::${kind}, 2))
+SELECT ST_AsText(ST_RemoveRepeatedPoints(ST_GeomFromText('LINESTRING (2 2, 1 1, 5 5, 1 1, 0 0, 0 0)')::{kind}, 2))
 ----
 LINESTRING (2 2, 5 5, 0 0)
 
 query I
-SELECT ST_AsText(ST_RemoveRepeatedPoints(ST_GeomFromText('LINESTRING (0 0, 0 0, 1 1, 5 5, 1 1, 2 2)')::${kind}, 2))
+SELECT ST_AsText(ST_RemoveRepeatedPoints(ST_GeomFromText('LINESTRING (0 0, 0 0, 1 1, 5 5, 1 1, 2 2)')::{kind}, 2))
 ----
 LINESTRING (0 0, 5 5, 2 2)
 
 query I
-SELECT ST_AsText(ST_RemoveRepeatedPoints(ST_GeomFromText('LINESTRING (0 0, 0.5 0, 1 0)')::${kind}, 0.75));
+SELECT ST_AsText(ST_RemoveRepeatedPoints(ST_GeomFromText('LINESTRING (0 0, 0.5 0, 1 0)')::{kind}, 0.75));
 ----
 LINESTRING (0 0, 1 0)
 
 # Ensure we the start and end are unchanged
 query I
-SELECT ST_AsText(ST_RemoveRepeatedPoints(ST_GeomFromText('LINESTRING (0 0, 1 1, 2 2, 3 3)')::${kind}, 100));
+SELECT ST_AsText(ST_RemoveRepeatedPoints(ST_GeomFromText('LINESTRING (0 0, 1 1, 2 2, 3 3)')::{kind}, 100));
 ----
 LINESTRING (0 0, 3 3)
 
 query I
-SELECT ST_AsText(ST_RemoveRepeatedPoints(ST_GeomFromText('LINESTRING (1 1, 1 1, 1 1, 1 1)')::${kind}, 2));
+SELECT ST_AsText(ST_RemoveRepeatedPoints(ST_GeomFromText('LINESTRING (1 1, 1 1, 1 1, 1 1)')::{kind}, 2));
 ----
 LINESTRING (1 1, 1 1)
 

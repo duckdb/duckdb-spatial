@@ -1,0 +1,69 @@
+# name: test/sql/gdal/st_read_layer.test
+# description: Selecting a layer by name or index in ST_Read (https://github.com/duckdb/duckdb-spatial/issues/882)
+# group: [gdal]
+
+require spatial
+
+statement ok
+COPY (
+    SELECT id, ST_GeomFromText('POINT (' || id || ' ' || id || ')') AS geom
+    FROM (VALUES (1), (2), (3)) AS t(id)
+) TO '{TEST_DIR}/test_layer.gpkg'
+WITH (FORMAT GDAL, DRIVER 'GPKG', LAYER_NAME 'test_layer');
+
+query I
+SELECT COUNT(*) FROM st_read('{TEST_DIR}/test_layer.gpkg');
+----
+3
+
+# By exact name
+query I
+SELECT COUNT(*) FROM st_read('{TEST_DIR}/test_layer.gpkg', layer => 'test_layer');
+----
+3
+
+# NULL means the first layer
+query I
+SELECT COUNT(*) FROM st_read('{TEST_DIR}/test_layer.gpkg', layer => NULL);
+----
+3
+
+# By index
+query I
+SELECT COUNT(*) FROM st_read('{TEST_DIR}/test_layer.gpkg', layer => 0);
+----
+3
+
+query I
+SELECT COUNT(*) FROM st_read('{TEST_DIR}/test_layer.gpkg', layer => '0');
+----
+3
+
+# Index out of range
+statement error
+SELECT * FROM st_read('{TEST_DIR}/test_layer.gpkg', layer => 1);
+----
+Layer index out of range (1), dataset has 1 layer(s)
+
+statement error
+SELECT * FROM st_read('{TEST_DIR}/test_layer.gpkg', layer => -1);
+----
+Layer index out of range (-1), dataset has 1 layer(s)
+
+# Unknown names
+statement error
+SELECT * FROM st_read('{TEST_DIR}/test_layer.gpkg', layer => 'layer_test');
+----
+Could not find layer with name: layer_test
+
+# Layer names are matched case-sensitively
+statement error
+SELECT * FROM st_read('{TEST_DIR}/test_layer.gpkg', layer => 'TEST_LAYER');
+----
+Could not find layer with name: TEST_LAYER
+
+# The database is still usable after the errors above
+query I
+SELECT COUNT(*) FROM st_read('{TEST_DIR}/test_layer.gpkg', layer => 'test_layer');
+----
+3

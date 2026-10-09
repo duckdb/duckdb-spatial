@@ -1,0 +1,48 @@
+require spatial
+
+statement ok
+CREATE TABLE dim_geography AS
+	WITH
+	  matches(name, geometry) AS (
+		VALUES
+		  ('Match_A', ST_GeomFromText('POLYGON ((-10 -10, 10 -10, 10 10, -10 10, -10 -10))')),
+		  ('Match_B', ST_GeomFromText('POLYGON ((-1 -1, 1 -1, 1 1, -1 1, -1 -1))')),
+		  ('Match_C', ST_GeomFromText('POLYGON ((-0.01 -0.01, 0.01 -0.01, 0.01 0.01, -0.01 0.01, -0.01 -0.01))'))
+	  ),
+	  small_polys AS (
+		SELECT
+		  'small_' || i AS name,
+		  ST_GeomFromText(
+			'POLYGON ((' ||
+			(100.0 + 0.0001 * (i % 1000)) || ' ' || (10.0 + 0.0001 * (i // 1000)) || ',' ||
+			(100.0 + 0.0001 * (i % 1000) + 0.0001) || ' ' || (10.0 + 0.0001 * (i // 1000)) || ',' ||
+			(100.0 + 0.0001 * (i % 1000) + 0.0001) || ' ' || (10.0 + 0.0001 * (i // 1000) + 0.0001) || ',' ||
+			(100.0 + 0.0001 * (i % 1000)) || ' ' || (10.0 + 0.0001 * (i // 1000) + 0.0001) || ',' ||
+			(100.0 + 0.0001 * (i % 1000)) || ' ' || (10.0 + 0.0001 * (i // 1000)) ||
+			'))'
+		  ) AS geometry
+		FROM range(0, 44000) t(i)
+	  ),
+	  nulls AS (
+		SELECT 'null_' || i AS name, NULL::GEOMETRY AS geometry
+		FROM range(0, 109000) t(i)
+	  )
+	SELECT name, geometry FROM (
+	  SELECT * FROM matches
+	  UNION ALL
+	  SELECT * FROM small_polys
+	  UNION ALL
+	  SELECT * FROM nulls
+	)
+	ORDER BY random();  -- crucial: nulls interleaved with non-nulls
+
+
+query I
+SELECT d.name
+FROM (SELECT ST_Point(0, 0) AS pt) s
+	LEFT JOIN dim_geography d ON ST_Within(s.pt, d.geometry)
+	ORDER BY d.name;
+----
+Match_A
+Match_B
+Match_C

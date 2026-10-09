@@ -1,8 +1,11 @@
+# name: test/sql/gdal/gdal_vsi.test
+# group: [gdal]
+
 require spatial
 
 # Test read via VSI
 query I
-SELECT COUNT(*) FROM st_read('/vsigzip/__WORKING_DIRECTORY__/test/data/amsterdam_roads_50.geojson.gz');
+SELECT COUNT(*) FROM st_read('/vsigzip/{WORKING_DIRECTORY}/test/data/amsterdam_roads_50.geojson.gz');
 ----
 50
 
@@ -13,6 +16,24 @@ set enable_external_access = false;
 
 # Test read via VSI
 statement error
-SELECT COUNT(*) FROM st_read('/vsigzip/__WORKING_DIRECTORY__/test/data/amsterdam_roads_50.geojson.gz');
+SELECT COUNT(*) FROM st_read('/vsigzip/{WORKING_DIRECTORY}/test/data/amsterdam_roads_50.geojson.gz');
 ----
 with VSI prefix: External access is disabled
+
+# Test that GDAL driver-prefixed URLs are blocked when external access is disabled
+statement error
+SELECT COUNT(*) FROM st_read('WFS:https://example.com/wfs');
+----
+with GDAL driver prefix: External access is disabled
+
+# Test that OAPIF driver-prefixed URLs are blocked when external access is disabled
+statement error
+SELECT COUNT(*) FROM st_read('OAPIF:https://example.com/collections');
+----
+with GDAL driver prefix: External access is disabled
+
+# Test that st_read_meta also blocks driver-prefixed URLs when external access is disabled
+statement error
+SELECT * FROM st_read_meta('WFS:https://example.com/wfs');
+----
+with GDAL driver prefix: External access is disabled

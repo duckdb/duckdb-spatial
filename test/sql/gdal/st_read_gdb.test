@@ -4,19 +4,19 @@
 require spatial
 
 statement error
-COPY (SELECT ST_Point(1,2) as geom, 10 as i) TO '__TEST_DIR__/test.gdb' WITH (FORMAT 'GDAL', DRIVER 'OpenFileGDB');
+COPY (SELECT ST_Point(1,2) as geom, 10 as i) TO '{TEST_DIR}/test.gdb' WITH (FORMAT 'GDAL', DRIVER 'OpenFileGDB');
 ----
 OpenFileGDB requires 'GEOMETRY_TYPE' parameter to be set when writing
 
 statement error
-COPY (SELECT ST_Point(1,2) as geom, 10 as i) TO '__TEST_DIR__/test_fail.gdb' WITH (FORMAT 'GDAL', DRIVER 'OpenFileGDB', GEOMETRY_TYPE 'LINESTRING');
+COPY (SELECT ST_Point(1,2) as geom, 10 as i) TO '{TEST_DIR}/test_fail.gdb' WITH (FORMAT 'GDAL', DRIVER 'OpenFileGDB', GEOMETRY_TYPE 'LINESTRING');
 ----
 Not implemented Error: Can only insert a LineString/MultiLineString/CircularString/CompoundCurve/MultiCurve in a esriGeometryLine layer
 
 statement ok
-COPY (SELECT ST_Point(1,2) as geom, 10 as i) TO '__TEST_DIR__/test.gdb' WITH (FORMAT 'GDAL', DRIVER 'OpenFileGDB', GEOMETRY_TYPE 'POINT');
+COPY (SELECT ST_Point(1,2) as geom, 10 as i) TO '{TEST_DIR}/test.gdb' WITH (FORMAT 'GDAL', DRIVER 'OpenFileGDB', GEOMETRY_TYPE 'POINT');
 
-query II
-FROM st_read('__TEST_DIR__/test.gdb');
+query III
+FROM st_read('{TEST_DIR}/test.gdb');
 ----
-10	POINT (1 2)
+1	10	POINT (1 2)

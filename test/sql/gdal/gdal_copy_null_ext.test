@@ -1,0 +1,17 @@
+# name: test/sql/gdal/gdal_copy_null_ext.test
+# group: [gdal]
+
+require spatial
+
+# Some GDAL drivers declare no file extension, so GDALGetMetadataItem() returns
+# NULL for GDAL_DMD_EXTENSIONS. Copying to such a driver must not try to build a
+# std::string from that NULL pointer.
+# See https://github.com/duckdb/duckdb-spatial/issues/818
+
+statement ok
+COPY (SELECT ST_GeomFromText('POINT (0 0)') AS geom)
+TO '{TEST_DIR}/issue818.mapml' WITH (FORMAT GDAL, DRIVER 'MapML');
+
+statement ok
+COPY (SELECT ST_GeomFromText('POINT (0 0)') AS geom)
+TO '{TEST_DIR}/issue818.xml' WITH (FORMAT GDAL, DRIVER 'GeoRSS');

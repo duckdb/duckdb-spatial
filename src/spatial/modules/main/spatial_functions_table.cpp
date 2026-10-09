@@ -1,7 +1,10 @@
+#include "duckdb/common/vector/map_vector.hpp"
+#include "duckdb/common/vector/struct_vector.hpp"
 #include "spatial/geometry/bbox.hpp"
 #include "spatial/modules/main/spatial_functions.hpp"
 #include "spatial/spatial_types.hpp"
 #include "spatial/util/function_builder.hpp"
+#include "duckdb/common/random_engine.hpp"
 
 namespace duckdb {
 
@@ -27,7 +30,7 @@ struct ST_GeneratePoints {
 	};
 
 	static unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &input,
-	                                     vector<LogicalType> &return_types, vector<string> &names) {
+	                                     vector<LogicalType> &return_types, vector<Identifier> &names) {
 		auto result = make_uniq<GeneratePointsBindData>();
 
 		return_types.push_back(GeoTypes::POINT_2D());
@@ -81,9 +84,9 @@ struct ST_GeneratePoints {
 		auto &bind_data = data_p.bind_data->Cast<GeneratePointsBindData>();
 		auto &state = data_p.global_state->Cast<GeneratePointsState>();
 
-		const auto &point_vec = StructVector::GetEntries(output.data[0]);
-		const auto &x_data = FlatVector::GetData<double>(*point_vec[0]);
-		const auto &y_data = FlatVector::GetData<double>(*point_vec[1]);
+		auto &point_vec = StructVector::GetEntries(output.data[0]);
+		auto x_data = FlatVector::GetDataMutable<double>(point_vec[0]);
+		auto y_data = FlatVector::GetDataMutable<double>(point_vec[1]);
 
 		const auto chunk_size = MinValue<idx_t>(STANDARD_VECTOR_SIZE, bind_data.count - state.current_idx);
 		for (idx_t i = 0; i < chunk_size; i++) {
@@ -93,6 +96,7 @@ struct ST_GeneratePoints {
 
 			state.current_idx++;
 		}
+		FlatVector::SetSize(output.data[0], count_t(chunk_size));
 		output.SetCardinality(chunk_size);
 	}
 
@@ -122,15 +126,23 @@ struct ST_GeneratePoints {
 		// TODO: Dont overload, make seed named parameter instead
 		TableFunctionSet set("ST_GeneratePoints");
 
-		TableFunction generate_points({GeoTypes::BOX_2D(), LogicalType::BIGINT}, Execute, Bind, Init);
-		generate_points.cardinality = Cardinality;
+		FunctionSignature without_seed;
+		without_seed.AddParameter("box", GeoTypes::BOX_2D()).AddParameter("count", LogicalType::BIGINT);
+
+		FunctionSignature with_seed;
+		with_seed.AddParameter("box", GeoTypes::BOX_2D())
+		    .AddParameter("count", LogicalType::BIGINT)
+		    .AddParameter("seed", LogicalType::BIGINT);
 
 		// Overload without seed
+		TableFunction generate_points("ST_GeneratePoints", std::move(without_seed), Execute, Bind, Init);
+		generate_points.cardinality = Cardinality;
 		set.AddFunction(generate_points);
 
 		// Overload with seed
-		generate_points.arguments = {GeoTypes::BOX_2D(), LogicalType::BIGINT, LogicalType::BIGINT};
-		set.AddFunction(generate_points);
+		TableFunction generate_points_seeded("ST_GeneratePoints", std::move(with_seed), Execute, Bind, Init);
+		generate_points_seeded.cardinality = Cardinality;
+		set.AddFunction(generate_points_seeded);
 		loader.RegisterFunction(set);
 
 		InsertionOrderPreservingMap<string> tags;

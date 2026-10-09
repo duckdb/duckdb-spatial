@@ -1,27 +1,30 @@
+# name: test/sql/geometry/st_exteriorring.test
+# group: [geometry]
+
 require spatial
 
 foreach TYPE GEOMETRY POLYGON_2D
 
 query I
-SELECT st_exteriorring(st_geomfromtext('POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))')::${TYPE});
+SELECT st_exteriorring(st_geomfromtext('POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))')::{TYPE});
 ----
 LINESTRING (0 0, 1 0, 1 1, 0 1, 0 0)
 
 query I
-SELECT st_exteriorring(st_geomfromtext('POLYGON EMPTY')::${TYPE});
+SELECT st_exteriorring(st_geomfromtext('POLYGON EMPTY')::{TYPE});
 ----
 LINESTRING EMPTY
 
 query I
-SELECT st_exteriorring(st_geomfromtext('POLYGON((0 0, 1 0, 1 1, 0 1, 0 0), (0.25 0.25, 0.75 0.25, 0.75 0.75, 0.25 0.75, 0.25 0.25))')::${TYPE});
+SELECT st_exteriorring(st_geomfromtext('POLYGON((0 0, 1 0, 1 1, 0 1, 0 0), (0.25 0.25, 0.75 0.25, 0.75 0.75, 0.25 0.75, 0.25 0.25))')::{TYPE});
 ----
 LINESTRING (0 0, 1 0, 1 1, 0 1, 0 0)
 
 query I
 SELECT st_exteriorring(geom) FROM (VALUES
-    (st_geomfromtext('POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))')::${TYPE}),
-    (st_geomfromtext('POLYGON EMPTY')::${TYPE}),
-    (st_geomfromtext('POLYGON((0 0, 2 0, 1 1, 0 2, 0 0), (0.25 0.25, 0.75 0.25, 0.75 0.75, 0.25 0.75, 0.25 0.25))')::${TYPE})
+    (st_geomfromtext('POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))')::{TYPE}),
+    (st_geomfromtext('POLYGON EMPTY')::{TYPE}),
+    (st_geomfromtext('POLYGON((0 0, 2 0, 1 1, 0 2, 0 0), (0.25 0.25, 0.75 0.25, 0.75 0.75, 0.25 0.75, 0.25 0.25))')::{TYPE})
  ) AS t(geom);
 ----
 LINESTRING (0 0, 1 0, 1 1, 0 1, 0 0)

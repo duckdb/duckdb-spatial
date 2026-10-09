@@ -1,3 +1,5 @@
+#include "duckdb/common/vector/map_vector.hpp"
+#include "duckdb/common/vector/struct_vector.hpp"
 #include "spatial/modules/shapefile/shapefile_module.hpp"
 #include "spatial/geometry/geometry_serialization.hpp"
 #include "spatial/geometry/sgl.hpp"
@@ -122,7 +124,7 @@ struct EncodingUtil {
 SAFile DuckDBShapefileOpen(void *userData, const char *filename, const char *access_mode) {
 	try {
 		auto &fs = *static_cast<FileSystem *>(userData);
-		constexpr auto flags = FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_NULL_IF_NOT_EXISTS;
+		const auto flags = FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_NULL_IF_NOT_EXISTS;
 		auto file_handle = fs.OpenFile(filename, flags);
 		if (!file_handle) {
 			return nullptr;
@@ -192,7 +194,7 @@ int DuckDBShapefileClose(SAFile file) {
 int DuckDBShapefileRemove(void *userData, const char *filename) {
 	try {
 		auto &fs = *reinterpret_cast<FileSystem *>(userData);
-		constexpr auto flags = FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_NULL_IF_NOT_EXISTS;
+		const auto flags = FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_NULL_IF_NOT_EXISTS;
 		const auto file = fs.OpenFile(filename, flags);
 		if (!file) {
 			return -1;
@@ -283,13 +285,14 @@ struct ST_ReadSHP {
 		vector<LogicalType> attribute_types;
 
 		explicit ShapefileBindData(string file_name_p)
-		    : file_name(std::move(file_name_p)), shape_count(0), shape_type(0), min_bound {0, 0, 0, 0},
-		      max_bound {0, 0, 0, 0}, attribute_encoding(AttributeEncoding::LATIN1) {
+		    : file_name(std::move(file_name_p)), shape_count(0),
+		      shape_type(0), min_bound {0, 0, 0, 0}, max_bound {0, 0, 0, 0},
+		      attribute_encoding(AttributeEncoding::LATIN1) {
 		}
 	};
 
 	static unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &input,
-	                                     vector<LogicalType> &return_types, vector<string> &names) {
+	                                     vector<LogicalType> &return_types, vector<Identifier> &names) {
 
 		auto file_name = StringValue::Get(input.inputs[0]);
 		auto result = make_uniq<ShapefileBindData>(file_name);
@@ -410,7 +413,7 @@ struct ST_ReadSHP {
 			idx_t count = 1;
 			for (size_t j = i + 1; j < names.size(); j++) {
 				if (names[i] == names[j]) {
-					names[j] += "_" + std::to_string(count++);
+					names[j] = Identifier(names[j].GetIdentifierName() + "_" + std::to_string(count++));
 				}
 			}
 		}
@@ -651,7 +654,7 @@ struct ST_ReadSHP {
 			blob.Finalize();
 
 			// Set the blob in the result vector
-			FlatVector::GetData<string_t>(result)[result_idx] = blob;
+			FlatVector::GetDataMutable<string_t>(result)[result_idx] = blob;
 		}
 	}
 
@@ -659,7 +662,7 @@ struct ST_ReadSHP {
 	                                  ArenaAllocator &arena, int geom_type) {
 		switch (geom_type) {
 		case SHPT_NULL:
-			FlatVector::Validity(result).SetAllInvalid(count);
+			FlatVector::ValidityMutable(result).SetAllInvalid(count);
 			break;
 		case SHPT_POINT:
 			ConvertGeomLoop<ConvertPoint>(result, record_start, count, shp_handle, arena);
@@ -743,7 +746,7 @@ struct ST_ReadSHP {
 			if (DBFIsAttributeNULL(dbf_handle, record_idx, field_idx)) {
 				FlatVector::SetNull(result, row_idx, true);
 			} else {
-				FlatVector::GetData<typename OP::TYPE>(result)[row_idx] =
+				FlatVector::GetDataMutable<typename OP::TYPE>(result)[row_idx] =
 				    OP::Convert(result, dbf_handle, record_idx, field_idx);
 			}
 			record_idx++;
@@ -773,7 +776,7 @@ struct ST_ReadSHP {
 					throw InvalidInputException("Could not decode VARCHAR field as valid UTF-8, try passing "
 					                            "encoding='blob' to skip decoding of string attributes");
 				}
-				FlatVector::GetData<string_t>(result)[row_idx] = result_str;
+				FlatVector::GetDataMutable<string_t>(result)[row_idx] = result_str;
 			}
 			record_idx++;
 		}
@@ -842,7 +845,7 @@ struct ST_ReadSHP {
 		gstate.shape_idx += output_size;
 
 		// Set the cardinality of the output
-		output.SetCardinality(output_size);
+		output.SetChildCardinality(output_size);
 	}
 
 	//------------------------------------------------------------------------------------------------------------------
@@ -879,7 +882,7 @@ struct ST_ReadSHP {
 
 		auto table_function = make_uniq<TableFunctionRef>();
 		vector<unique_ptr<ParsedExpression>> children;
-		children.push_back(make_uniq<ConstantExpression>(Value(table_name)));
+		children.push_back(ConstantExpression::FromValue(Value(table_name)));
 		table_function->function = make_uniq<FunctionExpression>("ST_ReadSHP", std::move(children));
 		return std::move(table_function);
 	}
@@ -888,12 +891,16 @@ struct ST_ReadSHP {
 	// Register
 	//------------------------------------------------------------------------------------------------------------------
 	static void Register(ExtensionLoader &loader) {
-		TableFunction read_func("ST_ReadSHP", {LogicalType::VARCHAR}, Execute, Bind, InitGlobal);
+		FunctionSignature signature;
+		signature.AddParameter("file_name", LogicalType::VARCHAR).WithTypedKwargs("options", [&](TypedKwargs &options) {
+			options.Add("encoding", LogicalType::VARCHAR);
+		});
 
-		read_func.named_parameters["encoding"] = LogicalType::VARCHAR;
+		TableFunction read_func("ST_ReadSHP", std::move(signature), Execute, Bind, InitGlobal);
 		read_func.table_scan_progress = GetProgress;
 		read_func.cardinality = GetCardinality;
 		read_func.projection_pushdown = true;
+		read_func.parallelism = TableFunctionParallelism::SEQUENTIAL;
 		loader.RegisterFunction(read_func);
 
 		InsertionOrderPreservingMap<string> tags;
@@ -943,7 +950,7 @@ struct Shapefile_Meta {
 	};
 
 	static unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &input,
-	                                     vector<LogicalType> &return_types, vector<string> &names) {
+	                                     vector<LogicalType> &return_types, vector<Identifier> &names) {
 
 		auto result = make_uniq<ShapeFileMetaBindData>();
 
@@ -958,13 +965,13 @@ struct Shapefile_Meta {
 
 		auto shape_type_count = sizeof(shape_type_map) / sizeof(ShapeTypeEntry);
 		auto varchar_vector = Vector(LogicalType::VARCHAR, shape_type_count);
-		auto varchar_data = FlatVector::GetData<string_t>(varchar_vector);
+		auto varchar_data = FlatVector::GetDataMutable<string_t>(varchar_vector);
 		for (idx_t i = 0; i < shape_type_count; i++) {
 			auto str = string_t(shape_type_map[i].shp_name);
 			varchar_data[i] = str.IsInlined() ? str : StringVector::AddString(varchar_vector, str);
 		}
-		auto shape_type_enum = LogicalType::ENUM("SHAPE_TYPE", varchar_vector, shape_type_count);
-		shape_type_enum.SetAlias("SHAPE_TYPE");
+		auto shape_type_enum =
+		    LogicalType::ENUM("SHAPE_TYPE", varchar_vector, shape_type_count).WithAlias("SHAPE_TYPE");
 
 		return_types.push_back(LogicalType::VARCHAR);
 		return_types.push_back(shape_type_enum);
@@ -1000,17 +1007,17 @@ struct Shapefile_Meta {
 		auto &fs = FileSystem::GetFileSystem(context);
 
 		auto &file_name_vector = output.data[0];
-		auto file_name_data = FlatVector::GetData<string_t>(file_name_vector);
+		auto file_name_data = FlatVector::GetDataMutable<string_t>(file_name_vector);
 		auto &shape_type_vector = output.data[1];
-		auto shape_type_data = FlatVector::GetData<uint8_t>(shape_type_vector);
+		auto shape_type_data = FlatVector::GetDataMutable<uint8_t>(shape_type_vector);
 		auto &bounds_vector = output.data[2];
 		auto &bounds_vector_children = StructVector::GetEntries(bounds_vector);
-		auto minx_data = FlatVector::GetData<double>(*bounds_vector_children[0]);
-		auto miny_data = FlatVector::GetData<double>(*bounds_vector_children[1]);
-		auto maxx_data = FlatVector::GetData<double>(*bounds_vector_children[2]);
-		auto maxy_data = FlatVector::GetData<double>(*bounds_vector_children[3]);
-		auto record_count_vector = output.data[3];
-		auto record_count_data = FlatVector::GetData<int32_t>(record_count_vector);
+		auto minx_data = FlatVector::GetDataMutable<double>(bounds_vector_children[0]);
+		auto miny_data = FlatVector::GetDataMutable<double>(bounds_vector_children[1]);
+		auto maxx_data = FlatVector::GetDataMutable<double>(bounds_vector_children[2]);
+		auto maxy_data = FlatVector::GetDataMutable<double>(bounds_vector_children[3]);
+		auto &record_count_vector = output.data[3];
+		auto record_count_data = FlatVector::GetDataMutable<int32_t>(record_count_vector);
 
 		auto output_count = MinValue<idx_t>(STANDARD_VECTOR_SIZE, bind_data.files.size() - state.current_file_idx);
 
@@ -1042,7 +1049,11 @@ struct Shapefile_Meta {
 		}
 
 		state.current_file_idx += output_count;
-		output.SetCardinality(output_count);
+		FlatVector::SetSize(bounds_vector_children[0], count_t(output_count));
+		FlatVector::SetSize(bounds_vector_children[1], count_t(output_count));
+		FlatVector::SetSize(bounds_vector_children[2], count_t(output_count));
+		FlatVector::SetSize(bounds_vector_children[3], count_t(output_count));
+		output.SetChildCardinality(output_count);
 	}
 
 	static double GetProgress(ClientContext &context, const FunctionData *bind_data,
@@ -1062,7 +1073,8 @@ struct Shapefile_Meta {
 	}
 
 	static void Register(ExtensionLoader &loader) {
-		TableFunction meta_func("shapefile_meta", {LogicalType::VARCHAR}, Execute, Bind, InitGlobal);
+		TableFunction meta_func("shapefile_meta", FunctionSignature().AddPositionalOnly("path", LogicalType::VARCHAR),
+		                        Execute, Bind, InitGlobal);
 		meta_func.table_scan_progress = GetProgress;
 		meta_func.cardinality = GetCardinality;
 		loader.RegisterFunction(MultiFileReader::CreateFunctionSet(meta_func));

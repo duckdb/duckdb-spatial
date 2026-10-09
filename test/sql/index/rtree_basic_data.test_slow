@@ -1,10 +1,16 @@
+# name: test/sql/index/rtree_basic_data.test_slow
+# group: [index]
+
 require parquet
 
 require spatial
 
 statement ok
+SET profiling_renderer_settings = MAP {'operator_casing': 'upper'};
+
+statement ok
 CREATE TABLE t1 as SELECT st_point(pickup_longitude, pickup_latitude) as geom, trip_distance, fare_amount
-FROM read_parquet('__WORKING_DIRECTORY__/test/data/nyc_taxi/yellow_tripdata_2010-01-limit1mil.parquet');
+FROM read_parquet('{WORKING_DIRECTORY}/test/data/nyc_taxi/yellow_tripdata_2010-01-limit1mil.parquet');
 
 query I
 SELECT count(*) FROM t1 WHERE ST_Within(geom, ST_MakeEnvelope(-74.004936,40.725275,-73.982620,40.745046));
@@ -13,6 +19,11 @@ SELECT count(*) FROM t1 WHERE ST_Within(geom, ST_MakeEnvelope(-74.004936,40.7252
 
 statement ok
 CREATE INDEX my_idx ON t1 USING RTREE (geom);
+
+# The envelope matches ~16% of the rows, so the cost model would (correctly) prefer a table scan here.
+# This test is about the index scan itself: force it.
+statement ok
+SET rtree_index_scan_ratio = 1.0;
 
 query II
 EXPLAIN SELECT count(*) FROM t1 WHERE ST_Within(geom, ST_MakeEnvelope(-74.004936,40.725275,-73.982620,40.745046));

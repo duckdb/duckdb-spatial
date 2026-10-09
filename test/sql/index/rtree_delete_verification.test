@@ -1,0 +1,42 @@
+# name: test/sql/index/rtree_delete_verification.test
+# group: [index]
+
+# DELETE with an indexable spatial predicate on an RTREE-indexed table used to throw
+# "INTERNAL Error: Failed to find referenced virtual column" under enable_verification,
+# because the rtree_index_scan function did not expose the table's virtual columns
+# (like rowid) after the logical plan was serialized and deserialized.
+require spatial
+
+statement ok
+PRAGMA enable_verification;
+
+statement ok
+CREATE TABLE t1 (geom GEOMETRY);
+
+statement ok
+INSERT INTO t1 SELECT ST_Point(x, y) FROM range(0, 10) r1(x), range(0, 10) r2(y);
+
+statement ok
+CREATE INDEX my_idx ON t1 USING RTREE (geom);
+
+statement ok
+DELETE FROM t1 WHERE ST_Within(geom, ST_MakeEnvelope(1.5, 1.5, 3.5, 3.5));
+
+query I
+SELECT count(*) FROM t1;
+----
+96
+
+query I
+SELECT count(*) FROM t1 WHERE ST_Within(geom, ST_MakeEnvelope(0.5, 0.5, 4.5, 4.5));
+----
+12
+
+# Updates hit the same code path
+statement ok
+UPDATE t1 SET geom = ST_Point(100, 100) WHERE ST_Within(geom, ST_MakeEnvelope(4.5, 4.5, 6.5, 6.5));
+
+query I
+SELECT count(*) FROM t1 WHERE ST_Within(geom, ST_MakeEnvelope(99, 99, 101, 101));
+----
+4

@@ -5,12 +5,14 @@
 #include "spatial/index/rtree/rtree.hpp"
 
 #include "duckdb/execution/index/bound_index.hpp"
+#include "duckdb/execution/index/index_type.hpp"
 #include "duckdb/execution/index/fixed_size_allocator.hpp"
 #include "duckdb/execution/index/index_pointer.hpp"
 
 namespace duckdb {
 
 class PhysicalOperator;
+class DuckTransaction;
 
 class RTreeIndex final : public BoundIndex {
 public:
@@ -18,7 +20,7 @@ public:
 	static constexpr auto TYPE_NAME = "RTREE";
 
 public:
-	RTreeIndex(const string &name, IndexConstraintType index_constraint_type, const vector<column_t> &column_ids,
+	RTreeIndex(const Identifier &name, IndexConstraintType index_constraint_type, const vector<column_t> &column_ids,
 	           TableIOManager &table_io_manager, const vector<unique_ptr<Expression>> &unbound_expressions,
 	           AttachedDatabase &db, const case_insensitive_map_t<Value> &options, ClientContext &context,
 	           const IndexStorageInfo &info = IndexStorageInfo(), idx_t estimated_cardinality = 0);
@@ -32,6 +34,20 @@ public:
 
 	unique_ptr<IndexScanState> InitializeScan(const Box2D<float> &query) const;
 	idx_t Scan(IndexScanState &state, Vector &result) const;
+
+	//! Estimate the fraction of indexed rows whose bounds intersect the query bounds, by walking the top of the R-tree
+	double EstimateSelectivity(const RTreeBounds &query) const;
+
+	//! Whether an index scan over the given query bounds is estimated to be selective enough to beat a full table scan
+	bool ShouldUseIndexScan(ClientContext &context, const RTreeBounds &query, idx_t total_rows) const;
+
+	//! The number of rows above which a full table scan is preferred over an index scan
+	static idx_t MaxIndexScanRows(ClientContext &context, idx_t total_rows);
+
+	//! Whether the index may be missing rows that are still visible to the given transaction.
+	//! Committed deletes are removed from the index right away (we do not keep them in a delta index), so a transaction
+	//! whose snapshot predates such a commit cannot rely on the index. The index must be (at least) read-locked.
+	bool MayMissVisibleRows(const DuckTransaction &transaction) const;
 
 	static unique_ptr<BoundIndex> Create(CreateIndexInput &input) {
 		auto res = make_uniq<RTreeIndex>(input.name, input.constraint_type, input.column_ids, input.table_io_manager,
@@ -47,7 +63,7 @@ public:
 	ErrorData Append(IndexLock &lock, DataChunk &entries, Vector &row_identifiers) override;
 
 	//! Deletes all data from the index. The lock obtained from InitializeLock must be held
-	void CommitDrop(IndexLock &index_lock) override;
+	void ResetStorage(IndexLock &index_lock) override;
 	//! Delete a chunk of entries from the index. The lock obtained from InitializeLock must be held
 	void Delete(IndexLock &lock, DataChunk &entries, Vector &row_identifiers) override;
 	//! Insert a chunk of entries into the index
@@ -58,7 +74,7 @@ public:
 	//! Serializes RTree memory to the WAL and returns the index storage information.
 	IndexStorageInfo SerializeToWAL(const case_insensitive_map_t<Value> &options) override;
 
-	idx_t GetInMemorySize(IndexLock &state) override;
+	idx_t GetInMemorySize(IndexLock &state) const override;
 
 	//! Merge another index into this index. The lock obtained from InitializeLock must be held, and the other
 	//! index must also be locked during the merge
@@ -80,9 +96,16 @@ public:
 	void VerifyBuffers(IndexLock &l) override;
 
 	string GetConstraintViolationMessage(VerifyExistenceType verify_type, idx_t failed_index,
-	                                     DataChunk &input) override {
+	                                     DataChunk &input) const override {
 		return "Constraint violation in RTree index";
 	}
+
+private:
+	//! Whether entries have ever been deleted from this index
+	bool has_deletes = false;
+	//! The last completed commit at the time of the latest delete. The delete itself belongs to a later commit, which
+	//! is still in progress for as long as this equals the last completed commit.
+	transaction_t last_commit_before_delete = 0;
 };
 
 } // namespace duckdb

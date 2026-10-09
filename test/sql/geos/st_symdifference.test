@@ -1,0 +1,41 @@
+# name: test/sql/geos/st_symdifference.test
+# group: [geos]
+
+require spatial
+
+# Standard test
+
+query I
+SELECT ST_AsText(ST_SymDifference(
+    ST_GeomFromText('POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))'),
+    ST_GeomFromText('POLYGON((1 1, 3 1, 3 3, 1 3, 1 1))')
+));
+----
+MULTIPOLYGON (((0 0, 0 2, 1 2, 1 1, 2 1, 2 0, 0 0)), ((1 3, 3 3, 3 1, 2 1, 2 2, 1 2, 1 3)))
+
+# Identical test
+
+query I
+SELECT ST_IsEmpty(ST_SymDifference(
+    ST_GeomFromText('LINESTRING(0 0, 5 5)'),
+    ST_GeomFromText('LINESTRING(0 0, 5 5)')
+));
+----
+true
+
+# Disjoint test 
+
+query I
+SELECT ST_AsText(ST_SymDifference(
+    ST_GeomFromText('POINT(0 0)'),
+    ST_GeomFromText('POINT(5 5)')
+));
+----
+MULTIPOINT (0 0, 5 5)
+
+# NULL test
+
+query I
+SELECT ST_SymDifference(NULL, ST_GeomFromText('POINT(0 0)'));
+----
+NULL

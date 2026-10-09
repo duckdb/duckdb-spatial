@@ -1,16 +1,23 @@
+# name: test/sql/gdal/gdal_axis_order.test
+# group: [gdal]
+
 require spatial
 
 statement ok
 CREATE TABLE data (id int, geom geometry);
 
 statement ok
-INSERT INTO data VALUES (1, ST_MakePoint(100.446569, 0));
+INSERT INTO data VALUES (1, ST_MakePoint(100, 0));
 
-# Should error, KML validates coordinate ranges
-statement error
-COPY data TO '__TEST_DIR__/output.kml' WITH (FORMAT GDAL, DRIVER 'KML', SRS 'EPSG:4326');
+# The KML driver does not validate coordinate ranges reliably, so dont expect an error here.
+# - (only once per process, and also just sets an error, not a warning, but still returns success)
+statement ok
+COPY data TO '{TEST_DIR}/output.kml' WITH (FORMAT GDAL, DRIVER 'KML', SRS 'EPSG:4326');
+
+query I
+select geom from st_read('{TEST_DIR}/output.kml');
 ----
-IO Error: Latitude 100.446569 is invalid. Valid range is [-90,90]. This warning will not be issued any more
+POINT (0 100)
 
 # Tell DuckDB to ignore CRS authority and always consider coordinates in XY order
 statement ok
@@ -18,4 +25,9 @@ SET geometry_always_xy = true;
 
 # Now works
 statement ok
-COPY data TO '__TEST_DIR__/output.kml' WITH (FORMAT GDAL, DRIVER 'KML', SRS 'EPSG:4326');
+COPY data TO '{TEST_DIR}/output.kml' WITH (FORMAT GDAL, DRIVER 'KML', SRS 'EPSG:4326');
+
+query I
+select geom from st_read('{TEST_DIR}/output.kml');
+----
+POINT (100 0)

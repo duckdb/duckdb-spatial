@@ -1,0 +1,120 @@
+# name: test/sql/index/rtree_join_deferred.test
+# group: [index]
+
+# Test that a spatial join can probe an R-tree index through its pushed-down bounding-box filter:
+# the probe-side seq scan is replaced with a "deferred bounds" index scan that resolves its query
+# bounds at runtime from the filter the join pushes, falling back to a full table scan when the
+# filter does not arrive or is not selective enough.
+require spatial
+
+statement ok
+SET profiling_renderer_settings = MAP {'operator_casing': 'upper'};
+
+statement ok
+PRAGMA threads=4;
+
+statement ok
+CREATE TABLE probe AS SELECT row_number() OVER () AS id, point::GEOMETRY AS geom
+FROM st_generatepoints({min_x: 0, min_y: 0, max_x: 1000, max_y: 1000}::BOX_2D, 30_000, 42);
+
+statement ok
+CREATE TABLE probe_noidx AS FROM probe;
+
+statement ok
+CREATE INDEX probe_idx ON probe USING RTREE (geom);
+
+statement ok
+CREATE TABLE build_small AS SELECT point::GEOMETRY AS geom
+FROM st_generatepoints({min_x: 480, min_y: 480, max_x: 520, max_y: 520}::BOX_2D, 100, 7);
+
+statement ok
+CREATE TABLE build_large AS SELECT point::GEOMETRY AS geom
+FROM st_generatepoints({min_x: 0, min_y: 0, max_x: 1000, max_y: 1000}::BOX_2D, 100, 8);
+
+# The probe side of a spatial join over an indexed geometry column becomes a deferred-bounds index scan
+query II
+EXPLAIN SELECT count(*) FROM probe p JOIN build_small b ON ST_Intersects(p.geom, b.geom);
+----
+physical_plan	<REGEX>:.*RTREE_INDEX_SCAN.*
+
+query II
+EXPLAIN SELECT count(*) FROM probe p JOIN build_small b ON ST_Intersects(p.geom, b.geom);
+----
+physical_plan	<REGEX>:.*deferred.*
+
+# Selective build side: the scan uses the index internally, results must match the non-indexed table
+query I
+SELECT (SELECT list(p.id ORDER BY p.id) FROM probe p JOIN build_small b ON ST_DWithin(p.geom, b.geom, 5.0))
+     = (SELECT list(p.id ORDER BY p.id) FROM probe_noidx p JOIN build_small b ON ST_DWithin(p.geom, b.geom, 5.0));
+----
+true
+
+# Non-selective build side: the scan falls back to a table scan internally, results must still match
+query I
+SELECT (SELECT list(p.id ORDER BY p.id) FROM probe p JOIN build_large b ON ST_DWithin(p.geom, b.geom, 5.0))
+     = (SELECT list(p.id ORDER BY p.id) FROM probe_noidx p JOIN build_large b ON ST_DWithin(p.geom, b.geom, 5.0));
+----
+true
+
+# Force index mode even for the non-selective build side
+statement ok
+SET rtree_index_scan_ratio = 1.0;
+
+query I
+SELECT (SELECT list(p.id ORDER BY p.id) FROM probe p JOIN build_large b ON ST_DWithin(p.geom, b.geom, 5.0))
+     = (SELECT list(p.id ORDER BY p.id) FROM probe_noidx p JOIN build_large b ON ST_DWithin(p.geom, b.geom, 5.0));
+----
+true
+
+# Force the table scan fallback even for the selective build side (the min_rows floor must also be
+# zeroed, as it otherwise always allows small scans through)
+statement ok
+SET rtree_index_scan_ratio = 0.0;
+
+statement ok
+SET rtree_index_scan_min_rows = 0;
+
+query I
+SELECT (SELECT list(p.id ORDER BY p.id) FROM probe p JOIN build_small b ON ST_DWithin(p.geom, b.geom, 5.0))
+     = (SELECT list(p.id ORDER BY p.id) FROM probe_noidx p JOIN build_small b ON ST_DWithin(p.geom, b.geom, 5.0));
+----
+true
+
+statement ok
+RESET rtree_index_scan_ratio;
+
+statement ok
+RESET rtree_index_scan_min_rows;
+
+# LEFT joins do not push down filters: the deferred scan gets no bounds and falls back, results must match
+query I
+SELECT (SELECT count(*) FROM probe p LEFT JOIN build_small b ON ST_DWithin(p.geom, b.geom, 5.0))
+     = (SELECT count(*) FROM probe_noidx p LEFT JOIN build_small b ON ST_DWithin(p.geom, b.geom, 5.0));
+----
+true
+
+# Empty build side
+statement ok
+CREATE TABLE build_empty (geom GEOMETRY);
+
+query I
+SELECT count(*) FROM probe p JOIN build_empty b ON ST_Intersects(p.geom, b.geom);
+----
+0
+
+# Transaction-local (uncommitted) probe rows are still found
+statement ok
+BEGIN;
+
+statement ok
+INSERT INTO probe SELECT 100000 + range, ST_Point(500, 500) FROM range(10);
+
+query I
+SELECT (SELECT count(*) FROM probe p JOIN build_small b ON ST_DWithin(p.geom, b.geom, 5.0))
+     = 10 * (SELECT count(*) FROM build_small b WHERE ST_DWithin(ST_Point(500, 500), b.geom, 5.0))
+     + (SELECT count(*) FROM probe_noidx p JOIN build_small b ON ST_DWithin(p.geom, b.geom, 5.0));
+----
+true
+
+statement ok
+ROLLBACK;

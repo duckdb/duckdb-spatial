@@ -1,3 +1,5 @@
+#include "duckdb/common/vector/map_vector.hpp"
+#include "duckdb/common/vector/struct_vector.hpp"
 #include "spatial/index/rtree/rtree_index_create_physical.hpp"
 #include "spatial/index/rtree/rtree_index.hpp"
 #include "spatial/index/rtree/rtree_node.hpp"
@@ -10,6 +12,7 @@
 #include "duckdb/storage/storage_manager.hpp"
 #include "duckdb/storage/table_io_manager.hpp"
 #include "duckdb/parallel/base_pipeline_event.hpp"
+#include "duckdb/planner/logical_operator.hpp"
 
 namespace duckdb {
 
@@ -76,9 +79,9 @@ unique_ptr<GlobalSinkState> PhysicalCreateRTreeIndex::GetGlobalSinkState(ClientC
 	auto &table_manager = TableIOManager::Get(storage);
 	auto &constraint_type = info->constraint_type;
 	auto &db = storage.db;
-	gstate->rtree =
-	    make_uniq<RTreeIndex>(info->index_name, constraint_type, storage_ids, table_manager, unbound_expressions, db,
-	                          info->options, context, IndexStorageInfo(), estimated_cardinality);
+	gstate->rtree = make_uniq<RTreeIndex>(Identifier(info->GetIndexName().GetIdentifierName()), constraint_type,
+	                                      storage_ids, table_manager, unbound_expressions, db, info->options, context,
+	                                      IndexStorageInfo(), estimated_cardinality);
 
 	gstate->max_node_capacity = gstate->rtree->tree->GetConfig().max_node_capacity;
 	gstate->entry_idx = gstate->max_node_capacity;
@@ -102,12 +105,12 @@ SinkResultType PhysicalCreateRTreeIndex::Sink(ExecutionContext &context, DataChu
 	// TODO: Dont flatten chunk
 	chunk.Flatten();
 
-	const auto &bbox_vecs = StructVector::GetEntries(chunk.data[0]);
+	auto &bbox_vecs = StructVector::GetEntries(chunk.data[0]);
 	const auto &rowid_data = FlatVector::GetData<row_t>(chunk.data[1]);
-	const auto min_x_data = FlatVector::GetData<float>(*bbox_vecs[0]);
-	const auto min_y_data = FlatVector::GetData<float>(*bbox_vecs[1]);
-	const auto max_x_data = FlatVector::GetData<float>(*bbox_vecs[2]);
-	const auto max_y_data = FlatVector::GetData<float>(*bbox_vecs[3]);
+	const auto min_x_data = FlatVector::GetData<float>(bbox_vecs[0]);
+	const auto min_y_data = FlatVector::GetData<float>(bbox_vecs[1]);
+	const auto max_x_data = FlatVector::GetData<float>(bbox_vecs[2]);
+	const auto max_y_data = FlatVector::GetData<float>(bbox_vecs[3]);
 
 	// Vectorized conversion from columnar to row-wise
 	RTreeEntry entries[STANDARD_VECTOR_SIZE];
@@ -282,9 +285,9 @@ static void AddIndexToCatalog(ClientContext &context, CreateRTreeIndexGlobalStat
 	// Create the index entry in the catalog
 	auto &schema = table.schema;
 
-	if (schema.GetEntry(schema.GetCatalogTransaction(context), CatalogType::INDEX_ENTRY, info.index_name)) {
+	if (schema.GetEntry(schema.GetCatalogTransaction(context), CatalogType::INDEX_ENTRY, info.GetIndexName())) {
 		if (info.on_conflict != OnCreateConflict::IGNORE_ON_CONFLICT) {
-			throw CatalogException("Index with name \"%s\" already exists", info.index_name);
+			throw CatalogException("Index with name \"%s\" already exists", info.GetIndexName());
 		}
 		// IF NOT EXISTS on existing index. We are done.
 		// TODO: Early out before this.
@@ -297,7 +300,7 @@ static void AddIndexToCatalog(ClientContext &context, CreateRTreeIndexGlobalStat
 	duck_index.initial_index_size = gstate.rtree->Cast<BoundIndex>().GetInMemorySize();
 
 	// Finally add it to storage
-	storage.AddIndex(std::move(gstate.rtree));
+	storage.AddIndex(std::move(gstate.rtree), duck_index.oid);
 }
 
 class RTreeIndexConstructionEvent final : public BasePipelineEvent {

@@ -2,18 +2,19 @@ vcpkg_from_github(
     OUT_SOURCE_PATH SOURCE_PATH
     REPO OSGeo/gdal
     REF "v${VERSION}"
-    SHA512 5b155229225e904b3619628ec27efdd273d9f083c1ee4f6d94041897d5bc9c3133590b70885ad61fc8864da2f334a75cf32bafe7f776c40bbbc3673fe842c986
+    SHA512 3b915c38cc7c9eb139df9335a90a2f6fd123c54e19ecb1f22670400eac76e317c5334f95dff5875c9c3fde8a0ef0f7aea86fa58ad42afaee823a46c6616e9c17
     HEAD_REF master
     PATCHES
         find-link-libraries.patch
-        fix-gdal-target-interfaces.patch
+        iconv.diff
+        libarchive.diff
         libkml.patch
+        sqlite3.diff
         target-is-valid.patch
         duckdb_gdal_json.patch
-        duckdb_gdal_msys.patch
-        duckdb_gdal_remove_filehandler.patch
-        duckdb_gdal_windows_static.patch
 )
+file(REMOVE "${SOURCE_PATH}/cmake/modules/packages/FindIconv.cmake")
+file(REMOVE "${SOURCE_PATH}/cmake/modules/packages/FindZSTD.cmake")
 # `vcpkg clean` stumbles over one subdir
 file(REMOVE_RECURSE "${SOURCE_PATH}/autotest")
 
@@ -23,24 +24,16 @@ vcpkg_replace_string("${SOURCE_PATH}/ogr/ogrsf_frmts/flatgeobuf/flatbuffers/base
 # Cf. cmake/helpers/CheckDependentLibraries.cmake
 # The default for all `GDAL_USE_<PKG>` dependencies is `OFF`.
 # Here, we explicitly control dependencies provided via vpcpkg.
-# "core" is used for a dependency which must be enabled to avoid vendored lib.
 vcpkg_check_features(OUT_FEATURE_OPTIONS FEATURE_OPTIONS
     FEATURES
         network          SPATIAL_USE_NETWORK
         geos             SPATIAL_USE_GEOS
 )
 
-if(GDAL_USE_ICONV AND VCPKG_TARGET_IS_WINDOWS)
-    list(APPEND FEATURE_OPTIONS -D_ICONV_SECOND_ARGUMENT_IS_NOT_CONST=ON)
-endif()
-
 # Compatibility with older Android versions https://github.com/OSGeo/gdal/pull/5941
-if(VCPKG_TARGET_IS_ANDROID AND ANRDOID_PLATFORM VERSION_LESS 24 AND (VCPKG_TARGET_ARCHITECTURE STREQUAL "x86" OR VCPKG_TARGET_ARCHITECTURE STREQUAL "arm"))
+if(VCPKG_TARGET_IS_ANDROID AND ANDROID_PLATFORM VERSION_LESS 24 AND (VCPKG_TARGET_ARCHITECTURE STREQUAL "x86" OR VCPKG_TARGET_ARCHITECTURE STREQUAL "arm"))
     list(APPEND FEATURE_OPTIONS -DBUILD_WITHOUT_64BIT_OFFSET=ON)
 endif()
-
-string(REPLACE "dynamic" "" qhull_target "Qhull::qhull${VCPKG_LIBRARY_LINKAGE}_r")
-
 
 # Doesnt work on wasm32
 if(NOT VCPKG_TARGET_ARCHITECTURE STREQUAL "wasm32")
@@ -56,8 +49,6 @@ vcpkg_cmake_configure(
         -DGDAL_OBJECT_LIBRARIES_POSITION_INDEPENDENT_CODE=ON # this is needed for GDAL to build with -fPIC
         -DBUILD_TESTING=OFF
         -DBUILD_APPS=OFF
-        # Build static library
-        #-DBUILD_SHARED_LIBS=OFF
 
         # Arrow
         -DGDAL_USE_ARROW=OFF
@@ -106,7 +97,8 @@ vcpkg_cmake_configure(
         -DGDAL_USE_LIBKML=OFF
 
         # Build these explicitly
-        -DOGR_ENABLE_DRIVER_MEM=ON
+        # (Compared to gdal 3.8.5, the MEM driver is now always built-in, and
+        # the NTF, TIGER, GEOCONCEPT and SVG drivers have been removed upstream)
         -DOGR_ENABLE_DRIVER_GEOJSON=ON
         -DOGR_ENABLE_DRIVER_GML=ON
         -DOGR_ENABLE_DRIVER_TAB=ON
@@ -114,14 +106,11 @@ vcpkg_cmake_configure(
         -DOGR_ENABLE_DRIVER_KML=ON
         -DOGR_ENABLE_DRIVER_VRT=ON
         -DOGR_ENABLE_DRIVER_AVC=ON
-        -DOGR_ENABLE_DRIVER_NTF=ON
         -DOGR_ENABLE_DRIVER_LVBAG=ON
         -DOGR_ENABLE_DRIVER_S57=ON
         -DOGR_ENABLE_DRIVER_CSV=ON
         -DOGR_ENABLE_DRIVER_DGN=ON
         -DOGR_ENABLE_DRIVER_GMT=ON
-        -DOGR_ENABLE_DRIVER_TIGER=ON
-        -DOGR_ENABLE_DRIVER_GEOCONCEPT=ON
         -DOGR_ENABLE_DRIVER_GEORSS=ON
         -DOGR_ENABLE_DRIVER_DXF=ON
         -DOGR_ENABLE_DRIVER_PGDUMP=ON
@@ -136,14 +125,12 @@ vcpkg_cmake_configure(
         -DOGR_ENABLE_DRIVER_FLATGEOBUF=ON
         -DOGR_ENABLE_DRIVER_MAPML=ON
         -DOGR_ENABLE_DRIVER_GPX=ON
-        -DOGR_ENABLE_DRIVER_SVG=ON
         -DOGR_ENABLE_DRIVER_SQLITE=ON
         -DOGR_ENABLE_DRIVER_GPKG=ON
         -DOGR_ENABLE_DRIVER_OSM=ON
         -DOGR_ENABLE_DRIVER_XLSX=ON
         -DOGR_ENABLE_DRIVER_CAD=ON
         -DOGR_ENABLE_DRIVER_ODS=ON
-        -DOGR_ENABLE_DRIVER_LVBAG=ON
         -DOGR_ENABLE_DRIVER_VFK=ON
         -DOGR_ENABLE_DRIVER_MVT=ON
         -DOGR_ENABLE_DRIVER_PMTILES=ON
@@ -161,35 +148,13 @@ vcpkg_cmake_configure(
 
         # Remove bindings
         -DBUILD_PYTHON_BINDINGS=OFF
-
-        #-DBUILD_PYTHON_BINDINGS=OFF
-        #-DBUILD_TESTING=OFF
-        #-DCMAKE_DISABLE_FIND_PACKAGE_CSharp=ON
-        #-DCMAKE_DISABLE_FIND_PACKAGE_Java=ON
-        #-DCMAKE_DISABLE_FIND_PACKAGE_JNI=ON
-        #-DCMAKE_DISABLE_FIND_PACKAGE_SWIG=ON
-        #-DCMAKE_DISABLE_FIND_PACKAGE_Arrow=ON
-        #-DGDAL_USE_INTERNAL_LIBS=OFF
-        #-DGDAL_USE_EXTERNAL_LIBS=OFF
-        #-DGDAL_BUILD_OPTIONAL_DRIVERS=ON
-        #-DOGR_BUILD_OPTIONAL_DRIVERS=ON
-        #-DFIND_PACKAGE2_KEA_ENABLED=OFF
-        #-DGDAL_CHECK_PACKAGE_MySQL_NAMES=unofficial-libmariadb
-        #-DGDAL_CHECK_PACKAGE_MySQL_TARGETS=unofficial::libmariadb
-        #-DMYSQL_LIBRARIES=unofficial::libmariadb
-        #-DGDAL_CHECK_PACKAGE_NetCDF_NAMES=netCDF
-        #-DGDAL_CHECK_PACKAGE_NetCDF_TARGETS=netCDF::netcdf
-        #-DGDAL_CHECK_PACKAGE_QHULL_NAMES=Qhull
-        #"-DGDAL_CHECK_PACKAGE_QHULL_TARGETS=${qhull_target}"
-        #"-DQHULL_LIBRARY=${qhull_target}"
-        #"-DCMAKE_PROJECT_INCLUDE=${CMAKE_CURRENT_LIST_DIR}/cmake-project-include.cmake"
     OPTIONS_DEBUG
         -DBUILD_APPS=OFF
     MAYBE_UNUSED_VARIABLES
-        QHULL_LIBRARY
         ACCEPT_MISSING_SQLITE3_MUTEX_ALLOC
         ACCEPT_MISSING_SQLITE3_RTREE
         ARROW_USE_STATIC_LIBRARIES
+        OPENSSL_USE_STATIC_LIBS
 )
 vcpkg_cmake_install()
 vcpkg_copy_pdbs()

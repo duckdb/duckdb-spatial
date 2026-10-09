@@ -783,6 +783,7 @@ enum class wkb_reader_error {
 	RECURSION_LIMIT = 3,
 	MIXED_ZM = 4,
 	INVALID_CHILD_TYPE = 5,
+	TRAILING_DATA = 6,
 };
 
 class wkb_reader {

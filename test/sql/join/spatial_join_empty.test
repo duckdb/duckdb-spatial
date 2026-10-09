@@ -1,7 +1,7 @@
-require spatial
+# name: test/sql/join/spatial_join_empty.test
+# group: [join]
 
-statement ok
-PRAGMA enable_verification
+require spatial
 
 # Create a bunch of points on a grid
 # between 0 and 500 in both x and y directions

@@ -1,0 +1,83 @@
+# name: test/sql/index/rtree_parallel_scan.test
+# group: [index]
+
+# Test that the RTREE index scan produces correct results when running with multiple threads
+require spatial
+
+statement ok
+SET profiling_renderer_settings = MAP {'operator_casing': 'upper'};
+
+statement ok
+PRAGMA threads=4;
+
+# This test exercises the parallel scan machinery, not the index scan cost model: always use the index
+statement ok
+SET rtree_index_scan_ratio = 1.0;
+
+statement ok
+CREATE TABLE t1 AS SELECT row_number() OVER () AS id, point::GEOMETRY AS geom
+FROM st_generatepoints({min_x: 0, min_y: 0, max_x: 1000, max_y: 1000}::BOX_2D, 50_000, 1337);
+
+# Keep an identical table without an index around to compare results against
+statement ok
+CREATE TABLE t2 AS FROM t1;
+
+statement ok
+CREATE INDEX my_idx ON t1 USING RTREE (geom);
+
+# Sanity check: the indexed table uses the index scan
+query II
+EXPLAIN SELECT count(*) FROM t1 WHERE ST_Within(geom, ST_MakeEnvelope(100, 100, 700, 700));
+----
+physical_plan	<REGEX>:.*RTREE_INDEX_SCAN.*
+
+# A large result set (many batches of row ids) must match the sequential scan of the copy
+query I
+SELECT
+	(SELECT count(*) FROM t1 WHERE ST_Within(geom, ST_MakeEnvelope(100, 100, 700, 700)))
+	=
+	(SELECT count(*) FROM t2 WHERE ST_Within(geom, ST_MakeEnvelope(100, 100, 700, 700)));
+----
+true
+
+# The actual fetched rows must match too, not just the counts
+query I
+SELECT
+	(SELECT list(id ORDER BY id) FROM t1 WHERE ST_Within(geom, ST_MakeEnvelope(100, 100, 700, 700)))
+	=
+	(SELECT list(id ORDER BY id) FROM t2 WHERE ST_Within(geom, ST_MakeEnvelope(100, 100, 700, 700)));
+----
+true
+
+# Deleted rows are filtered out during the parallel fetch
+statement ok
+DELETE FROM t1 WHERE id % 3 = 0;
+
+statement ok
+DELETE FROM t2 WHERE id % 3 = 0;
+
+query I
+SELECT
+	(SELECT list(id ORDER BY id) FROM t1 WHERE ST_Within(geom, ST_MakeEnvelope(100, 100, 700, 700)))
+	=
+	(SELECT list(id ORDER BY id) FROM t2 WHERE ST_Within(geom, ST_MakeEnvelope(100, 100, 700, 700)));
+----
+true
+
+# Transaction-local (not yet committed to the index) rows are still returned
+statement ok
+BEGIN;
+
+statement ok
+INSERT INTO t1 SELECT 100000 + range, ST_Point(150 + range % 10, 150 + range % 10) FROM range(1000);
+
+query I
+SELECT
+	(SELECT count(*) FROM t1 WHERE ST_Within(geom, ST_MakeEnvelope(100, 100, 700, 700)))
+	=
+	1000 + (SELECT count(*) FROM t2 WHERE ST_Within(geom, ST_MakeEnvelope(100, 100, 700, 700)));
+----
+true
+
+statement ok
+ROLLBACK;

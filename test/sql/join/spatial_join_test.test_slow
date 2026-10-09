@@ -1,4 +1,10 @@
+# name: test/sql/join/spatial_join_test.test_slow
+# group: [join]
+
 require spatial
+
+statement ok
+SET profiling_renderer_settings = MAP {'operator_casing': 'upper'};
 
 statement ok
 create table t1(g GEOMETRY);

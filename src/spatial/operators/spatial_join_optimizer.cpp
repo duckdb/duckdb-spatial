@@ -8,9 +8,15 @@
 #include "duckdb/planner/operator/logical_any_join.hpp"
 #include "duckdb/catalog/catalog_entry/scalar_function_catalog_entry.hpp"
 #include "duckdb/optimizer/optimizer_extension.hpp"
+#include "duckdb/optimizer/join_filter_pushdown_optimizer.hpp"
+#include "duckdb/execution/operator/join/join_filter_pushdown.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
+#include "duckdb/planner/expression/bound_columnref_expression.hpp"
+#include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/operator/logical_filter.hpp"
+#include "duckdb/planner/operator/logical_get.hpp"
+#include "duckdb/planner/table_filter.hpp"
 
 namespace duckdb {
 
@@ -56,11 +62,11 @@ static bool HasInversePredicate(const string &func_name) {
 static unique_ptr<Expression> GetInversePredicate(ClientContext &context, unique_ptr<Expression> expr) {
 	auto &func = expr->Cast<BoundFunctionExpression>();
 
-	const auto it = spatial_predicate_inverse_map.find(func.function.name);
+	const auto it = spatial_predicate_inverse_map.find(func.Function().GetName().GetIdentifierName());
 	D_ASSERT(it != spatial_predicate_inverse_map.end());
 
 	// Swap the arguments
-	std::swap(func.children[0], func.children[1]);
+	std::swap(func.GetChildrenMutable()[0], func.GetChildrenMutable()[1]);
 
 	if (it->first == it->second) {
 		// We've already swapped the child, so just return the expression
@@ -69,16 +75,17 @@ static unique_ptr<Expression> GetInversePredicate(ClientContext &context, unique
 
 	// Get the function from the catalog
 	auto &catalog = Catalog::GetSystemCatalog(context);
-	auto &entry = catalog.GetEntry<ScalarFunctionCatalogEntry>(context, DEFAULT_SCHEMA, it->second);
-	auto inverse_func =
-	    entry.functions.GetFunctionByArguments(context, {func.children[0]->return_type, func.children[1]->return_type});
+	auto &entry = catalog.GetEntry<ScalarFunctionCatalogEntry>(
+	    context, QualifiedName(catalog.GetName(), Identifier::DefaultSchema(), Identifier(it->second)));
+	const auto &inverse_func = *entry.functions.GetFunctionByArguments(
+	    context, {func.GetChildren()[0]->GetReturnType(), func.GetChildren()[1]->GetReturnType()});
 
-	return make_uniq_base<Expression, BoundFunctionExpression>(func.return_type, inverse_func, std::move(func.children),
-	                                                           nullptr, func.is_operator);
+	auto func_expr = inverse_func.Bind(context, std::move(func.GetChildrenMutable()));
+	return std::move(func_expr);
 }
 
-static bool IsSpatialJoinPredicate(const unique_ptr<Expression> &expr, const unordered_set<idx_t> &left_bindings,
-                                   const unordered_set<idx_t> &right_bindings, bool &needs_flipping) {
+static bool IsSpatialJoinPredicate(const unique_ptr<Expression> &expr, const unordered_set<TableIndex> &left_bindings,
+                                   const unordered_set<TableIndex> &right_bindings, bool &needs_flipping) {
 
 	const auto total_side = JoinSide::GetJoinSide(*expr, left_bindings, right_bindings);
 
@@ -87,29 +94,41 @@ static bool IsSpatialJoinPredicate(const unique_ptr<Expression> &expr, const uno
 	}
 
 	// Check if the expression is a spatial predicate
-	if (expr->type != ExpressionType::BOUND_FUNCTION) {
+	if (expr->GetExpressionType() != ExpressionType::BOUND_FUNCTION) {
 		return false;
 	}
 
 	auto &func = expr->Cast<BoundFunctionExpression>();
 
-	// The function must be a binary predicate
-	if (func.children.size() != 2) {
+	// The function must be a binary predicate over its first two children.
+	// Any further children (e.g. the ST_DWithin distance) must be constant, as only the first two are rebound.
+	if (func.GetChildren().size() < 2) {
 		return false;
+	}
+	for (idx_t i = 2; i < func.GetChildren().size(); i++) {
+		if (!func.GetChildren()[i]->IsFoldable()) {
+			return false;
+		}
 	}
 
 	// The function must return a boolean
-	if (func.return_type != LogicalType::BOOLEAN) {
+	if (func.GetReturnType() != LogicalType::BOOLEAN) {
 		return false;
 	}
 
 	// The function must be a recognized spatial predicate
-	if (spatial_predicate_map.count(func.function.name) == 0) {
+	if (spatial_predicate_map.count(func.Function().GetName().GetIdentifierName()) == 0) {
 		return false;
 	}
 
-	const auto left_side = JoinSide::GetJoinSide(*func.children[0], left_bindings, right_bindings);
-	const auto right_side = JoinSide::GetJoinSide(*func.children[1], left_bindings, right_bindings);
+	// The function's operands must be GEOMETRY
+	if (func.GetChildren()[0]->GetReturnType().id() != LogicalTypeId::GEOMETRY ||
+	    func.GetChildren()[1]->GetReturnType().id() != LogicalTypeId::GEOMETRY) {
+		return false;
+	}
+
+	const auto left_side = JoinSide::GetJoinSide(*func.GetChildren()[0], left_bindings, right_bindings);
+	const auto right_side = JoinSide::GetJoinSide(*func.GetChildren()[1], left_bindings, right_bindings);
 
 	// Can the condition can be cleanly split into two sides?
 	if (left_side == JoinSide::BOTH || right_side == JoinSide::BOTH) {
@@ -117,13 +136,77 @@ static bool IsSpatialJoinPredicate(const unique_ptr<Expression> &expr, const uno
 	}
 
 	if (left_side == JoinSide::RIGHT) {
-		if (!HasInversePredicate(func.function.name)) {
+		if (!HasInversePredicate(func.Function().GetName().GetIdentifierName())) {
 			return false;
 		}
 		needs_flipping = true;
 	}
 
 	return true;
+}
+
+// Look through GEOMETRY->GEOMETRY casts down to a plain column reference
+static bool TryGetProbeColumnBinding(const Expression &expr, ColumnBinding &binding) {
+	reference<const Expression> current = expr;
+	while (BoundCastExpression::IsCast(current.get())) {
+		auto &cast_child = BoundCastExpression::Child(current.get().Cast<BoundFunctionExpression>());
+		if (cast_child.GetReturnType().id() != LogicalTypeId::GEOMETRY) {
+			return false;
+		}
+		current = cast_child;
+	}
+	if (current.get().GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) {
+		return false;
+	}
+	binding = current.get().Cast<BoundColumnRefExpression>().Binding();
+	return true;
+}
+
+// Set up a bbox filter pushdown into the probe-side scan(s), mirroring the hash join's JoinFilterPushdownOptimizer.
+// The build-side R-tree's bounding box is computed at runtime (in the physical operator's Finalize) and pushed as an
+// ST_Intersects_Extent expression filter, which the geometry zonemap can use to prune row groups on the probe side.
+static void SetupFilterPushdown(LogicalSpatialJoin &join) {
+	// We can only filter the probe (left) side when unmatched probe rows are dropped, i.e. for INNER and RIGHT joins.
+	// LEFT/OUTER must emit every probe row.
+	if (join.join_type != JoinType::INNER && join.join_type != JoinType::RIGHT) {
+		return;
+	}
+
+	auto &pred = join.spatial_predicate->Cast<BoundFunctionExpression>();
+
+	// The probe side is always children[0] of the (possibly flipped) predicate.
+	ColumnBinding probe_binding;
+	if (!TryGetProbeColumnBinding(*pred.GetChildren()[0], probe_binding)) {
+		// Probe key is not a plain geometry column reference, cannot push down
+		return;
+	}
+
+	// Reuse the core traversal to find the LogicalGet(s) the probe column maps to (through projections, filters, etc.)
+	vector<JoinFilterPushdownColumn> columns;
+	JoinFilterPushdownColumn column;
+	column.probe_column_index = probe_binding;
+	columns.push_back(column);
+
+	vector<PushdownFilterTarget> targets;
+	JoinFilterPushdownOptimizer::GetPushdownFilterTargets(*join.children[0], std::move(columns), targets);
+
+	for (auto &target : targets) {
+		auto &get = target.get;
+		for (auto &col : target.columns) {
+			// The geometry zonemap pruning only applies to GEOMETRY columns
+			if (col.storage_type.id() != LogicalTypeId::GEOMETRY) {
+				continue;
+			}
+			if (!get.dynamic_filters) {
+				get.dynamic_filters = make_shared_ptr<DynamicTableFilterSet>();
+			}
+			SpatialJoinPushdownTarget pushdown_target;
+			pushdown_target.dynamic_filters = get.dynamic_filters;
+			pushdown_target.probe_column_index = col.probe_column_index.column_index;
+			pushdown_target.column_type = col.storage_type;
+			join.filter_pushdown_targets.push_back(std::move(pushdown_target));
+		}
+	}
 }
 
 static bool TrySwapComparisonJoin(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
@@ -160,8 +243,8 @@ static bool TrySwapComparisonJoin(OptimizerExtensionInput &input, unique_ptr<Log
 	// Get the table indexes that are reachable from the left and right children
 	const auto &left_child = cmp_join.children[0];
 	const auto &right_child = cmp_join.children[1];
-	unordered_set<idx_t> left_bindings;
-	unordered_set<idx_t> right_bindings;
+	unordered_set<TableIndex> left_bindings;
+	unordered_set<TableIndex> right_bindings;
 	LogicalJoin::GetTableReferences(*left_child, left_bindings);
 	LogicalJoin::GetTableReferences(*right_child, right_bindings);
 
@@ -184,18 +267,20 @@ static bool TrySwapComparisonJoin(OptimizerExtensionInput &input, unique_ptr<Log
 	spatial_join->types = std::move(cmp_join.types);
 	spatial_join->left_projection_map = std::move(cmp_join.left_projection_map);
 	spatial_join->right_projection_map = std::move(cmp_join.right_projection_map);
-	spatial_join->join_stats = std::move(cmp_join.join_stats);
 	spatial_join->mark_index = cmp_join.mark_index;
 	spatial_join->has_estimated_cardinality = cmp_join.has_estimated_cardinality;
 	spatial_join->estimated_cardinality = cmp_join.estimated_cardinality;
 
 	// If this is ST_DWithin, try to extract the constant distance value
 	const auto &pred_func = spatial_join->spatial_predicate->Cast<BoundFunctionExpression>();
-	if (pred_func.function.name == "ST_DWithin") {
+	if (pred_func.Function().GetName() == "ST_DWithin") {
 		// Try to get the constant distance value from the bind data;
 		spatial_join->has_const_distance =
-		    ST_DWithinHelper::TryGetConstDistance(pred_func.bind_info, spatial_join->const_distance);
+		    ST_DWithinHelper::TryGetConstDistance(pred_func.BindInfo(), spatial_join->const_distance);
 	}
+
+	// Try to set up bounding-box filter pushdown into the probe-side scan(s)
+	SetupFilterPushdown(*spatial_join);
 
 	// Also take all the conditions from the comparison join and add them as filters
 	filter.expressions.clear();
@@ -241,8 +326,8 @@ static void TrySwapAnyJoin(OptimizerExtensionInput &input, unique_ptr<LogicalOpe
 	// Get the table indexes that are reachable from the left and right children
 	auto &left_child = any_join.children[0];
 	auto &right_child = any_join.children[1];
-	unordered_set<idx_t> left_bindings;
-	unordered_set<idx_t> right_bindings;
+	unordered_set<TableIndex> left_bindings;
+	unordered_set<TableIndex> right_bindings;
 	LogicalJoin::GetTableReferences(*left_child, left_bindings);
 	LogicalJoin::GetTableReferences(*right_child, right_bindings);
 
@@ -291,18 +376,20 @@ static void TrySwapAnyJoin(OptimizerExtensionInput &input, unique_ptr<LogicalOpe
 	spatial_join->types = std::move(any_join.types);
 	spatial_join->left_projection_map = std::move(any_join.left_projection_map);
 	spatial_join->right_projection_map = std::move(any_join.right_projection_map);
-	spatial_join->join_stats = std::move(any_join.join_stats);
 	spatial_join->mark_index = any_join.mark_index;
 	spatial_join->has_estimated_cardinality = any_join.has_estimated_cardinality;
 	spatial_join->estimated_cardinality = any_join.estimated_cardinality;
 
 	// If this is ST_DWithin, try to extract the constant distance value
 	const auto &pred_func = spatial_join->spatial_predicate->Cast<BoundFunctionExpression>();
-	if (pred_func.function.name == "ST_DWithin") {
+	if (pred_func.Function().GetName() == "ST_DWithin") {
 		// Try to get the constant distance value from the bind data;
 		spatial_join->has_const_distance =
-		    ST_DWithinHelper::TryGetConstDistance(pred_func.bind_info, spatial_join->const_distance);
+		    ST_DWithinHelper::TryGetConstDistance(pred_func.BindInfo(), spatial_join->const_distance);
 	}
+
+	// Try to set up bounding-box filter pushdown into the probe-side scan(s)
+	SetupFilterPushdown(*spatial_join);
 
 	if (spatial_join->join_type == JoinType::INNER && !extra_predicates.empty()) {
 		// Create a filter on top of the spatial join for the extra predicates

@@ -13,6 +13,7 @@ class prepared_geometry;
 namespace duckdb {
 
 class ArenaAllocator;
+class Value;
 
 // todo:
 struct Serde {
@@ -23,6 +24,8 @@ struct Serde {
 	                                size_t buffer_size);
 
 	static uint32_t TryGetBounds(const string_t &blob, Box2D<float> &bbox);
+	//! Extract the bounding box of a constant GEOMETRY value. Returns false for NULL and empty geometries.
+	static bool TryGetBounds(const Value &value, Box2D<float> &bbox);
 };
 
 } // namespace duckdb

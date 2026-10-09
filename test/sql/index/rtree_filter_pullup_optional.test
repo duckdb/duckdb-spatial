@@ -1,0 +1,68 @@
+# name: test/sql/index/rtree_filter_pullup_optional.test
+# group: [index]
+
+# Regression test: when a scan is rewritten to an R-tree index scan, its pushed-down table filters are
+# pulled up into a LogicalFilter (the index scan's row-id fetches cannot apply them), while the in-scan
+# copies are wrapped as OPTIONAL filters: they still prune row groups via zonemaps (which matters when a
+# deferred scan falls back to a full table scan) but skip row-level evaluation, so rows are not filtered
+# twice. These queries verify that filtering stays correct through every scan mode with that split.
+require spatial
+
+statement ok
+SET profiling_renderer_settings = MAP {'operator_casing': 'upper'};
+
+statement ok
+PRAGMA threads=4;
+
+statement ok
+CREATE TABLE t AS SELECT range AS id, ST_Point(range % 100, range // 100) AS geom FROM range(0, 10000);
+
+statement ok
+CREATE TABLE t_noidx AS FROM t;
+
+statement ok
+CREATE INDEX t_idx ON t USING RTREE (geom);
+
+# Plan-time index scan with an extra pushed-down filter: the filter must sit above the scan
+query II
+EXPLAIN SELECT count(*) FROM t WHERE ST_Within(geom, ST_MakeEnvelope(1.5, 1.5, 3.5, 3.5)) AND id > 150;
+----
+physical_plan	<REGEX>:.*FILTER.*RTREE_INDEX_SCAN.*
+
+query I
+SELECT (SELECT count(*) FROM t WHERE ST_Within(geom, ST_MakeEnvelope(1.5, 1.5, 3.5, 3.5)) AND id > 150)
+     = (SELECT count(*) FROM t_noidx WHERE ST_Within(geom, ST_MakeEnvelope(1.5, 1.5, 3.5, 3.5)) AND id > 150);
+----
+true
+
+statement ok
+CREATE TABLE build (geom GEOMETRY);
+
+statement ok
+INSERT INTO build VALUES (ST_Point(50.5, 50.5));
+
+# Deferred join scan + extra filter, resolving to an index scan at runtime
+query I
+SELECT (SELECT count(*) FROM t p JOIN build b ON ST_DWithin(p.geom, b.geom, 2.0) WHERE p.id > 150)
+     = (SELECT count(*) FROM t_noidx p JOIN build b ON ST_DWithin(p.geom, b.geom, 2.0) WHERE p.id > 150);
+----
+true
+
+# Same, forced into the full-table-scan fallback: the pulled-up filter must still apply exactly once
+statement ok
+SET rtree_index_scan_ratio = 0.0;
+
+statement ok
+SET rtree_index_scan_min_rows = 0;
+
+query I
+SELECT (SELECT count(*) FROM t p JOIN build b ON ST_DWithin(p.geom, b.geom, 2.0) WHERE p.id > 150)
+     = (SELECT count(*) FROM t_noidx p JOIN build b ON ST_DWithin(p.geom, b.geom, 2.0) WHERE p.id > 150);
+----
+true
+
+statement ok
+RESET rtree_index_scan_ratio;
+
+statement ok
+RESET rtree_index_scan_min_rows;

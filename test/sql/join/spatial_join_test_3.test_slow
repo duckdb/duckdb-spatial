@@ -1,7 +1,10 @@
+# name: test/sql/join/spatial_join_test_3.test_slow
+# group: [join]
+
 require spatial
 
 statement ok
-PRAGMA enable_verification
+SET profiling_renderer_settings = MAP {'operator_casing': 'upper'};
 
 statement ok
 SELECT setseed(0.5);
@@ -22,7 +25,7 @@ INSERT INTO t1 SELECT
 					st_point(x + 70, y),
 					list_transform(
 						list_sort([{u: random() * 2 * 3.14, w: (random() * 2 - 1) * 15} for _ in range(1,16)]),
-						v -> st_point(x + cos(v.u) * 70 + cos(v.u) * v.w, y + sin(v.u) * 70 + sin(v.u) * v.w))
+						lambda v: st_point(x + cos(v.u) * 70 + cos(v.u) * v.w, y + sin(v.u) * 70 + sin(v.u) * v.w))
 				),
 				st_point(x + 70, y)
 			)

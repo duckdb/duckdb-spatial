@@ -4,6 +4,9 @@
 
 // DUCKDB
 #include "duckdb/main/extension/extension_loader.hpp"
+#include "duckdb/logging/logger.hpp"
+#include "duckdb/planner/expression_iterator.hpp"
+#include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/function/copy_function.hpp"
 #include "duckdb/function/table/arrow.hpp"
 #include "duckdb/common/arrow/arrow_converter.hpp"
@@ -15,7 +18,10 @@
 #include "duckdb/parser/expression/function_expression.hpp"
 #include "duckdb/common/multi_file/multi_file_reader.hpp"
 #include "duckdb/common/types/uuid.hpp"
+#include "duckdb/common/operator/cast_operators.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
+
+#include <utility>
 
 // GDAL
 #include "gdal.h"
@@ -24,6 +30,7 @@
 #include "ogr_srs_api.h"
 #include "ogrsf_frmts.h"
 #include "cpl_string.h"
+#include "cpl_error.h"
 #include "cpl_vsi.h"
 #include "cpl_vsi_error.h"
 #include "cpl_vsi_virtual.h"
@@ -38,42 +45,127 @@ namespace duckdb {
 namespace {
 
 //======================================================================================================================
+// GDAL Error Handling
+//======================================================================================================================
+// GDAL's internals are not exception-safe: throwing a C++ exception from a CPLErrorHandler (or a VSI callback) unwinds
+// through GDAL's own C/C++ frames and leaks heap allocations that would otherwise be freed on the normal return path.
+// Instead we install a non-throwing handler that just silences GDAL's default stderr output, and inspect GDAL's
+// thread-local error state at our own call boundaries.
+
+// Map GDAL's thread-local last-error state to a DuckDB exception and throw it. Call this only once a GDAL call has
+// already reported failure through its return value. `fallback` is used when GDAL recorded no fresh failure of its own.
+// We reset GDAL's error state before throwing so a recovered/stale error can't leak onto the next call on this thread.
+
+// Parse the DuckDB message part out of a raw GDAL message (GDAL re-reports caught exceptions as CPLE_AppDefined) and
+// strip any /vsiduckdb-<uuid>/ prefix to make the error more readable when we print file paths.
+string CleanGDALMessage(const char *raw_msg) {
+	ErrorData error_data(raw_msg);
+	auto msg = error_data.RawMessage();
+	const auto path_pos = msg.find("/vsiduckdb-");
+	if (path_pos != string::npos) {
+		msg.erase(path_pos, 48);
+	}
+	return msg;
+}
+
+[[noreturn]] void ThrowGDALError(const string &fallback) {
+
+	// If GDAL didn't report a fresh error, but we still want to throw, use the fallback message on its own.
+	if (CPLGetLastErrorType() < CE_Failure) {
+		CPLErrorReset();
+		throw IOException(fallback);
+	}
+
+	const auto code = CPLGetLastErrorNo();
+
+	auto msg = CleanGDALMessage(CPLGetLastErrorMsg());
+	if (msg.empty()) {
+		msg = fallback;
+	}
+
+	// Reset GDAL's error state before throwing so a recovered/stale error can't leak onto the next call on this thread.
+	CPLErrorReset();
+
+	switch (code) {
+	case CPLE_NoWriteAccess:
+		throw PermissionException(msg);
+	case CPLE_UserInterrupt:
+		throw InterruptException();
+	case CPLE_OutOfMemory:
+		throw OutOfMemoryException(msg);
+	case CPLE_NotSupported:
+		throw NotImplementedException(msg);
+	case CPLE_AssertionFailed:
+	case CPLE_ObjectNull:
+		throw InternalException(msg);
+	case CPLE_IllegalArg:
+		throw InvalidInputException(msg);
+	case CPLE_AppDefined:
+	case CPLE_HttpResponse:
+	case CPLE_FileIO:
+	case CPLE_OpenFailed:
+	default:
+		throw IOException(msg);
+	}
+}
+
+// Run a DuckDB FileSystem operation from within a GDAL VSI callback, converting any C++ exception into a VSI error plus
+// the given error return value. Exceptions must never cross the C VSI boundary
+template <class FUNC>
+auto VSIGuard(FUNC &&func, decltype(std::declval<FUNC &>()()) error_value) -> decltype(std::declval<FUNC &>()()) {
+	try {
+		return func();
+	} catch (std::exception &ex) {
+		VSIError(VSIE_FileError, "%s", CleanGDALMessage(ex.what()).c_str());
+		return error_value;
+	} catch (...) {
+		VSIError(VSIE_FileError, "Unknown error in GDAL VSI callback");
+		return error_value;
+	}
+}
+
+//======================================================================================================================
 // GDAL FILE
 //======================================================================================================================
 class DuckDBFileHandle final : public VSIVirtualHandle {
 public:
 	explicit DuckDBFileHandle(unique_ptr<FileHandle> file_handle_p)
-	    : file_handle(std::move(file_handle_p)), is_eof(false), can_seek(file_handle->CanSeek()) {
+	    : file_handle(std::move(file_handle_p)), is_eof(false), is_error(false), can_seek(file_handle->CanSeek()) {
 	}
 
 	vsi_l_offset Tell() override {
-		return static_cast<vsi_l_offset>(file_handle->SeekPosition());
+		return VSIGuard([&]() -> vsi_l_offset { return static_cast<vsi_l_offset>(file_handle->SeekPosition()); },
+		                static_cast<vsi_l_offset>(-1));
 	}
 
 	int Seek(vsi_l_offset nOffset, int nWhence) override {
-		// Reset EOF flag on seek
-		is_eof = false;
+		return VSIGuard(
+		    [&]() -> int {
+			    // Reset EOF flag on seek
+			    is_eof = false;
 
-		// Use the reset function instead to allow compressed file handles to rewind
-		// even if they don't support seeking
-		if (nWhence == SEEK_SET && nOffset == 0) {
-			file_handle->Reset();
-			return 0;
-		}
+			    // Use the reset function instead to allow compressed file handles to rewind
+			    // even if they don't support seeking
+			    if (nWhence == SEEK_SET && nOffset == 0) {
+				    file_handle->Reset();
+				    return 0;
+			    }
 
-		switch (nWhence) {
-		case SEEK_SET:
-			file_handle->Seek(nOffset);
-			return 0;
-		case SEEK_CUR:
-			file_handle->Seek(file_handle->SeekPosition() + nOffset);
-			return 0;
-		case SEEK_END:
-			file_handle->Seek(file_handle->GetFileSize() + nOffset);
-			return 0;
-		default:
-			return -1;
-		}
+			    switch (nWhence) {
+			    case SEEK_SET:
+				    file_handle->Seek(nOffset);
+				    return 0;
+			    case SEEK_CUR:
+				    file_handle->Seek(file_handle->SeekPosition() + nOffset);
+				    return 0;
+			    case SEEK_END:
+				    file_handle->Seek(file_handle->GetFileSize() + nOffset);
+				    return 0;
+			    default:
+				    return -1;
+			    }
+		    },
+		    -1);
 	}
 
 	size_t Read(void *buffer, size_t size, size_t count) override {
@@ -90,18 +182,19 @@ public:
 				bytes_left -= bytes_read;
 				bytes_data += bytes_read;
 			}
-		} catch (...) {
-			if (bytes_left != 0) {
-				if (file_handle->SeekPosition() == file_handle->GetFileSize()) {
-					// Is at EOF!
-					is_eof = true;
-				}
+		} catch (std::exception &ex) {
+			// Never let the exception cross into GDAL (it is not exception-safe). A clean EOF is reported as EOF;
+			// otherwise record a VSI error and return the partial count. Note: GDAL 3.8.5 can't distinguish a short
+			// read from an error (fixed in 3.9.2), so a real error here may be observed as EOF by the caller.
+			if (file_handle->SeekPosition() == file_handle->GetFileSize()) {
+				is_eof = true;
 			} else {
-				// else, error!
-				// unfortunately, this version of GDAL cant distinguish between errors and reading less bytes
-				// its avaiable in 3.9.2, but we're stuck on 3.8.5 for now.
-				throw;
+				is_error = true;
+				VSIError(VSIE_FileError, "%s", CleanGDALMessage(ex.what()).c_str());
 			}
+		} catch (...) {
+			is_error = true;
+			VSIError(VSIE_FileError, "Unknown error reading file");
 		}
 
 		return count - (bytes_left / size);
@@ -111,32 +204,56 @@ public:
 		return is_eof ? TRUE : FALSE;
 	}
 
+	int Error() override {
+		return is_error ? TRUE : FALSE;
+	}
+
+	void ClearErr() override {
+		is_eof = false;
+		is_error = false;
+	}
+
 	size_t Write(const void *buffer, size_t size, size_t count) override {
 		size_t written_bytes = 0;
 		try {
 			written_bytes = file_handle->Write(const_cast<void *>(buffer), size * count);
+		} catch (std::exception &ex) {
+			VSIError(VSIE_FileError, "%s", CleanGDALMessage(ex.what()).c_str());
 		} catch (...) {
-			// ignore
+			VSIError(VSIE_FileError, "Unknown error writing file");
 		}
 		return written_bytes / size;
 	}
 
 	int Flush() override {
-		file_handle->Sync();
-		return 0;
+		return VSIGuard(
+		    [&]() -> int {
+			    file_handle->Sync();
+			    return 0;
+		    },
+		    -1);
 	}
 	int Truncate(vsi_l_offset nNewSize) override {
-		file_handle->Truncate(static_cast<int64_t>(nNewSize));
-		return 0;
+		return VSIGuard(
+		    [&]() -> int {
+			    file_handle->Truncate(static_cast<int64_t>(nNewSize));
+			    return 0;
+		    },
+		    -1);
 	}
 	int Close() override {
-		file_handle->Close();
-		return 0;
+		return VSIGuard(
+		    [&]() -> int {
+			    file_handle->Close();
+			    return 0;
+		    },
+		    -1);
 	}
 
 private:
 	unique_ptr<FileHandle> file_handle = nullptr;
 	bool is_eof = false;
+	bool is_error = false;
 	bool can_seek = false;
 };
 
@@ -152,8 +269,8 @@ public:
 		return client_prefix + value;
 	}
 
-	VSIVirtualHandle *Open(const char *gdal_file_path, const char *access, bool set_error,
-	                       CSLConstList /*papszoptions */) override {
+	VSIVirtualHandleUniquePtr Open(const char *gdal_file_path, const char *access, bool set_error,
+	                               CSLConstList /*papszoptions */) override {
 
 		// Strip the prefix to get the real file path
 		const auto real_file_path = StripPrefix(gdal_file_path);
@@ -195,12 +312,13 @@ public:
 				flags |= FileFlags::FILE_FLAGS_READ;
 			}
 		} else {
-			throw InternalException("Unknown file access type");
+			VSIError(VSIE_FileError, "Unknown file access type: %s", access);
+			return nullptr;
 		}
 
 		try {
 			auto file = fs.OpenFile(real_file_path, flags | FileCompressionType::AUTO_DETECT);
-			return new DuckDBFileHandle(std::move(file));
+			return VSIVirtualHandleUniquePtr(new DuckDBFileHandle(std::move(file)));
 
 		} catch (std::exception &ex) {
 
@@ -236,137 +354,161 @@ public:
 	}
 
 	int Stat(const char *gdal_file_name, VSIStatBufL *result, int n_flags) override {
-		auto real_file_path = StripPrefix(gdal_file_name);
-		auto &fs = FileSystem::GetFileSystem(context);
+		return VSIGuard(
+		    [&]() -> int {
+			    auto real_file_path = StripPrefix(gdal_file_name);
+			    auto &fs = FileSystem::GetFileSystem(context);
 
-		memset(result, 0, sizeof(VSIStatBufL));
+			    memset(result, 0, sizeof(VSIStatBufL));
 
-		if (fs.IsPipe(real_file_path)) {
-			result->st_mode = S_IFCHR;
-			return 0;
-		}
+			    if (fs.IsPipe(real_file_path)) {
+				    result->st_mode = S_IFCHR;
+				    return 0;
+			    }
 
-		if (!(fs.FileExists(real_file_path) ||
-		      (!FileSystem::IsRemoteFile(real_file_path) && fs.DirectoryExists(real_file_path)))) {
-			return -1;
-		}
+			    if (!(fs.FileExists(real_file_path) ||
+			          (!FileSystem::IsRemoteFile(real_file_path) && fs.DirectoryExists(real_file_path)))) {
+				    return -1;
+			    }
 
 #ifdef _WIN32
-		if (!FileSystem::IsRemoteFile(real_file_path) && fs.DirectoryExists(real_file_path)) {
-			result->st_mode = S_IFDIR;
-			return 0;
-		}
+			    if (!FileSystem::IsRemoteFile(real_file_path) && fs.DirectoryExists(real_file_path)) {
+				    result->st_mode = S_IFDIR;
+				    return 0;
+			    }
 #endif
 
-		FileOpenFlags flags;
-		flags |= FileFlags::FILE_FLAGS_READ;
-		flags |= FileFlags::FILE_FLAGS_NULL_IF_NOT_EXISTS;
-		flags |= FileCompressionType::AUTO_DETECT;
+			    FileOpenFlags flags;
+			    flags |= FileFlags::FILE_FLAGS_READ;
+			    flags |= FileFlags::FILE_FLAGS_NULL_IF_NOT_EXISTS;
+			    flags |= FileCompressionType::AUTO_DETECT;
 
-		const auto file = fs.OpenFile(real_file_path, flags);
-		if (!file) {
-			return -1;
-		}
+			    const auto file = fs.OpenFile(real_file_path, flags);
+			    if (!file) {
+				    return -1;
+			    }
 
-		try {
-			result->st_size = static_cast<off_t>(fs.GetFileSize(*file));
-		} catch (...) {
-		}
-		try {
-			result->st_mtime = Timestamp::ToTimeT(fs.GetLastModifiedTime(*file));
-		} catch (...) {
-		}
-		try {
-			const auto type = file->GetType();
-			switch (type) {
-			case FileType::FILE_TYPE_REGULAR:
-				result->st_mode = S_IFREG;
-				break;
-			case FileType::FILE_TYPE_DIR:
-				result->st_mode = S_IFDIR;
-				break;
-			case FileType::FILE_TYPE_CHARDEV:
-				result->st_mode = S_IFCHR;
-				break;
-			default:
-				// HTTPFS returns invalid type for everything basically.
-				if (FileSystem::IsRemoteFile(real_file_path)) {
-					result->st_mode = S_IFREG;
-				} else {
-					return -1;
-				}
-			}
-		} catch (...) {
-		}
-		return 0;
+			    try {
+				    result->st_size = static_cast<off_t>(fs.GetFileSize(*file));
+			    } catch (...) {
+			    }
+			    try {
+				    result->st_mtime = Timestamp::ToTimeT(fs.GetLastModifiedTime(*file));
+			    } catch (...) {
+			    }
+			    try {
+				    const auto type = file->GetType();
+				    switch (type) {
+				    case FileType::FILE_TYPE_REGULAR:
+					    result->st_mode = S_IFREG;
+					    break;
+				    case FileType::FILE_TYPE_DIR:
+					    result->st_mode = S_IFDIR;
+					    break;
+				    case FileType::FILE_TYPE_CHARDEV:
+					    result->st_mode = S_IFCHR;
+					    break;
+				    default:
+					    // HTTPFS returns invalid type for everything basically.
+					    if (FileSystem::IsRemoteFile(real_file_path)) {
+						    result->st_mode = S_IFREG;
+					    } else {
+						    return -1;
+					    }
+				    }
+			    } catch (...) {
+			    }
+			    return 0;
+		    },
+		    -1);
 	}
 
-	bool IsLocal(const char *gdal_file_path) override {
+	bool IsLocal(const char *gdal_file_path) const override {
 		const auto real_file_path = StripPrefix(gdal_file_path);
 		return !FileSystem::IsRemoteFile(real_file_path);
 	}
 
 	int Mkdir(const char *pszDirname, long nMode) override {
-		auto &fs = FileSystem::GetFileSystem(context);
-		const auto dir_name = StripPrefix(pszDirname);
+		return VSIGuard(
+		    [&]() -> int {
+			    auto &fs = FileSystem::GetFileSystem(context);
+			    const auto dir_name = StripPrefix(pszDirname);
 
-		fs.CreateDirectory(dir_name);
-		return 0;
+			    fs.CreateDirectory(dir_name);
+			    return 0;
+		    },
+		    -1);
 	}
 
 	int Rmdir(const char *pszDirname) override {
-		auto &fs = FileSystem::GetFileSystem(context);
-		const auto dir_name = StripPrefix(pszDirname);
+		return VSIGuard(
+		    [&]() -> int {
+			    auto &fs = FileSystem::GetFileSystem(context);
+			    const auto dir_name = StripPrefix(pszDirname);
 
-		fs.RemoveDirectory(dir_name);
-		return 0;
+			    fs.RemoveDirectory(dir_name);
+			    return 0;
+		    },
+		    -1);
 	}
 
 	int RmdirRecursive(const char *pszDirname) override {
-		auto &fs = FileSystem::GetFileSystem(context);
-		const auto dir_name = StripPrefix(pszDirname);
+		return VSIGuard(
+		    [&]() -> int {
+			    auto &fs = FileSystem::GetFileSystem(context);
+			    const auto dir_name = StripPrefix(pszDirname);
 
-		fs.RemoveDirectory(dir_name);
-		return 0;
+			    fs.RemoveDirectory(dir_name);
+			    return 0;
+		    },
+		    -1);
 	}
 
 	char **ReadDirEx(const char *gdal_dir_name, int max_files) override {
-		auto &fs = FileSystem::GetFileSystem(context);
-		const auto dir_name = StripPrefix(gdal_dir_name);
+		return VSIGuard(
+		    [&]() -> char ** {
+			    auto &fs = FileSystem::GetFileSystem(context);
+			    const auto dir_name = StripPrefix(gdal_dir_name);
 
-		CPLStringList files;
-		auto files_count = 0;
-		fs.ListFiles(dir_name, [&](const string &file_name, bool is_dir) {
-			if (files_count >= max_files) {
-				return;
-			}
-			const auto tmp = AddPrefix(file_name);
-			files.AddString(tmp.c_str());
-			files_count++;
-		});
-		return files.StealList();
+			    CPLStringList files;
+			    auto files_count = 0;
+			    fs.ListFiles(dir_name, [&](const string &file_name, bool is_dir) {
+				    if (files_count >= max_files) {
+					    return;
+				    }
+				    const auto tmp = AddPrefix(file_name);
+				    files.AddString(tmp.c_str());
+				    files_count++;
+			    });
+			    return files.StealList();
+		    },
+		    nullptr);
 	}
 
 	char **SiblingFiles(const char *gdal_file_path) override {
-		auto &fs = FileSystem::GetFileSystem(context);
+		return VSIGuard(
+		    [&]() -> char ** {
+			    auto &fs = FileSystem::GetFileSystem(context);
 
-		const auto real_file_path = StripPrefix(gdal_file_path);
+			    const auto real_file_path = StripPrefix(gdal_file_path);
 
-		const auto real_file_stem = StringUtil::GetFileStem(real_file_path);
-		const auto base_file_path = fs.JoinPath(StringUtil::GetFilePath(real_file_path), real_file_stem);
-		const auto glob_file_path = base_file_path + ".*";
+			    const auto real_file_stem = StringUtil::GetFileStem(real_file_path);
+			    const auto base_file_path = fs.JoinPath(StringUtil::GetFilePath(real_file_path), real_file_stem);
+			    const auto glob_file_path = base_file_path + ".*";
 
-		if (fs.IsRemoteFile(base_file_path)) {
-			// Sibling file listing is expensive for remote files, so avoid it here.
-			// GDAL will fall back to a ReadDir if needed.
-			return nullptr;
-		}
+			    if (fs.IsRemoteFile(base_file_path)) {
+				    // Sibling file listing is expensive for remote files, so avoid it here.
+				    // GDAL will fall back to a ReadDir if needed.
+				    return nullptr;
+			    }
 
-		CPLStringList files;
-		for (auto &file : fs.Glob(glob_file_path)) {
-			files.AddString(AddPrefix(file.path).c_str());
-		}
-		return files.StealList();
+			    CPLStringList files;
+			    for (auto &file : fs.Glob(glob_file_path)) {
+				    files.AddString(AddPrefix(file.path).c_str());
+			    }
+			    return files.StealList();
+		    },
+		    nullptr);
 	}
 
 	int HasOptimizedReadMultiRange(const char *pszPath) override {
@@ -384,7 +526,8 @@ public:
 		}
 	}
 
-	int Rename(const char *oldpath, const char *newpath) override {
+	int Rename(const char *oldpath, const char *newpath, GDALProgressFunc /*pfnProgress*/,
+	           void * /*pProgressData*/) override {
 		auto &fs = FileSystem::GetFileSystem(context);
 		const auto real_old_path = StripPrefix(oldpath);
 		const auto real_new_path = StripPrefix(newpath);
@@ -436,11 +579,39 @@ public:
 		VSIFileManager::RemoveHandler(client_prefix);
 	}
 
+	// Check if a path looks like a GDAL driver-prefixed URL (e.g., "WFS:https://...", "OAPIF:https://...")
+	// These need to be passed directly to GDALOpenEx without our custom VSI prefix.
+	static bool IsGDALDriverPrefixedURL(const string &value) {
+		auto colon_pos = value.find(':');
+		if (colon_pos == string::npos || colon_pos == 0 || colon_pos > 20) {
+			return false;
+		}
+		// Check that the prefix is all uppercase letters (GDAL driver names are uppercase)
+		for (idx_t i = 0; i < colon_pos; i++) {
+			char c = value[i];
+			if (!StringUtil::CharacterIsAlpha(c) || c != StringUtil::CharacterToUpper(c)) {
+				return false;
+			}
+		}
+		// Check that after the colon there is a URL scheme (http:// or https://)
+		// This excludes database connection strings like "PG:dbname=..." which are not supported.
+		auto rest = value.substr(colon_pos + 1);
+		return StringUtil::StartsWith(rest, "http://") || StringUtil::StartsWith(rest, "https://");
+	}
+
 	string AddPrefix(const string &value) const {
 		// If the user explicitly asked for a VSI prefix, we don't add our own
 		if (StringUtil::StartsWith(value, "/vsi")) {
 			if (!Settings::Get<EnableExternalAccessSetting>(context)) {
 				throw PermissionException("Cannot open file '%s' with VSI prefix: External access is disabled", value);
+			}
+			return value;
+		}
+		// If the path is a GDAL driver-prefixed URL (e.g., "WFS:https://..."), pass it through directly
+		if (IsGDALDriverPrefixedURL(value)) {
+			if (!Settings::Get<EnableExternalAccessSetting>(context)) {
+				throw PermissionException("Cannot open file '%s' with GDAL driver prefix: External access is disabled",
+				                          value);
 			}
 			return value;
 		}
@@ -490,7 +661,7 @@ public:
 	OGRwkbGeometryType layer_type = wkbUnknown;
 };
 
-auto Bind(ClientContext &ctx, TableFunctionBindInput &input, vector<LogicalType> &col_types, vector<string> &col_names)
+auto Bind(ClientContext &ctx, TableFunctionBindInput &input, vector<LogicalType> &col_types, vector<Identifier> &col_names)
     -> unique_ptr<FunctionData> {
 
 	auto result = make_uniq<BindData>();
@@ -547,11 +718,12 @@ auto Bind(ClientContext &ctx, TableFunctionBindInput &input, vector<LogicalType>
 	                                result->dataset_drivers, result->dataset_options, result->dataset_sibling);
 
 	if (!dataset) {
-		throw IOException("Could not open GDAL dataset at: %s", result->real_file_path);
+		ThrowGDALError(StringUtil::Format("Could not open GDAL dataset at: %s", result->real_file_path));
 	}
 
-	ArrowSchema schema;
-	ArrowArrayStream stream;
+	// Zero-initialize so that the cleanup path below can safely check the release callbacks
+	ArrowSchema schema = {};
+	ArrowArrayStream stream = {};
 
 	try {
 
@@ -563,36 +735,37 @@ auto Bind(ClientContext &ctx, TableFunctionBindInput &input, vector<LogicalType>
 		// Find layer
 		const auto layer_param = input.named_parameters.find("layer");
 
-		if (layer_param != input.named_parameters.end()) {
-			if (layer_param->second.type() == LogicalType::INTEGER) {
-				// Find layer by index
-				const auto layer_idx = IntegerValue::Get(layer_param->second);
-				if (layer_idx < 0) {
-					throw BinderException("Layer index must be positive");
+		// A NULL layer means "use the first layer"
+		if (layer_param != input.named_parameters.end() && !layer_param->second.IsNull()) {
+			const auto &layer_name = StringValue::Get(layer_param->second);
+			auto found = false;
+
+			// First, try to find the layer by name
+			for (int i = 0; i < layer_count; i++) {
+				const auto layer = GDALDatasetGetLayer(dataset, i);
+				if (!layer) {
+					continue;
 				}
-				if (layer_idx > layer_count) {
-					throw BinderException(
-					    StringUtil::Format("Layer index out of range (%s > %s)", layer_idx, layer_count));
+				if (OGR_L_GetName(layer) == layer_name) {
+					result->layer_idx = i;
+					found = true;
+					break;
+				}
+			}
+
+			// Otherwise, try to interpret the value as a layer index
+			int32_t layer_idx;
+			if (!found && TryCast::Operation(string_t(layer_name), layer_idx, true)) {
+				if (layer_idx < 0 || layer_idx >= layer_count) {
+					throw BinderException("Layer index out of range (%d), dataset has %d layer(s)", layer_idx,
+					                      layer_count);
 				}
 				result->layer_idx = layer_idx;
-			} else if (layer_param->second.type() == LogicalType::VARCHAR) {
-				// Find layer by name
-				const auto &layer_name = StringValue::Get(layer_param->second);
-				auto found = false;
-				for (int i = 0; i < layer_count; i++) {
-					const auto layer = GDALDatasetGetLayer(dataset, i);
-					if (!layer) {
-						continue;
-					}
-					if (OGR_L_GetName(layer) == layer_name) {
-						result->layer_idx = i;
-						found = true;
-						break;
-					}
-				}
-				if (!found) {
-					throw BinderException("Could not find layer with name: %s", layer_name);
-				}
+				found = true;
+			}
+
+			if (!found) {
+				throw BinderException("Could not find layer with name: %s", layer_name);
 			}
 		}
 
@@ -618,17 +791,20 @@ auto Bind(ClientContext &ctx, TableFunctionBindInput &input, vector<LogicalType>
 		// Get the layer geometry type if available
 		result->layer_type = OGR_L_GetGeomType(layer);
 
-		// Check FID column
+		// Only suppress the FID if the layer already exposes it as a regular attribute field
 		const auto fid_col = OGR_L_GetFIDColumn(layer);
 		if (fid_col && strcmp(fid_col, "") != 0) {
-			// Do not include the explicit FID if we already have it as a column
-			result->layer_options.AddString("INCLUDE_FID=NO");
+			const auto layer_defn = OGR_L_GetLayerDefn(layer);
+			if (OGR_FD_GetFieldIndex(layer_defn, fid_col) >= 0) {
+				result->layer_options.AddString("INCLUDE_FID=NO");
+			}
 		}
+
 		const auto geom_col_name = OGR_L_GetGeometryColumn(layer);
 
 		// Get the arrow stream
 		if (!OGR_L_GetArrowStream(layer, &stream, result->layer_options.List())) {
-			throw IOException("Could not get GDAL Arrow stream at: %s", result->real_file_path);
+			ThrowGDALError(StringUtil::Format("Could not get GDAL Arrow stream at: %s", result->real_file_path));
 		}
 
 		// And the schema
@@ -652,7 +828,7 @@ auto Bind(ClientContext &ctx, TableFunctionBindInput &input, vector<LogicalType>
 				// Rename the geometry column to "geom" unless keep_wkb is set
 				col_names.push_back("geom");
 			} else {
-				col_names.push_back(child_schema.name);
+				col_names.emplace_back(child_schema.name);
 			}
 
 			if (duck_type.id() != LogicalTypeId::GEOMETRY) {
@@ -739,16 +915,16 @@ auto Pushdown(ClientContext &context, LogicalGet &get, FunctionData *bind_data, 
 		if (expr->GetExpressionType() != ExpressionType::BOUND_FUNCTION) {
 			continue;
 		}
-		if (expr->return_type != LogicalType::BOOLEAN) {
+		if (expr->GetReturnType() != LogicalType::BOOLEAN) {
 			continue;
 		}
 		const auto &func = expr->Cast<BoundFunctionExpression>();
-		if (func.children.size() != 2) {
+		if (func.GetChildren().size() != 2) {
 			continue;
 		}
 
-		if (func.children[0]->return_type.id() != LogicalTypeId::GEOMETRY ||
-		    func.children[1]->return_type.id() != LogicalTypeId::GEOMETRY) {
+		if (func.GetChildren()[0]->GetReturnType().id() != LogicalTypeId::GEOMETRY ||
+		    func.GetChildren()[1]->GetReturnType().id() != LogicalTypeId::GEOMETRY) {
 			continue;
 		}
 
@@ -759,7 +935,7 @@ auto Pushdown(ClientContext &context, LogicalGet &get, FunctionData *bind_data, 
 
 		auto found = false;
 		for (const auto &name : geometry_predicates) {
-			if (StringUtil::CIEquals(func.function.name.c_str(), name)) {
+			if (StringUtil::CIEquals(func.Function().GetName().c_str(), name)) {
 				found = true;
 				break;
 			}
@@ -769,8 +945,8 @@ auto Pushdown(ClientContext &context, LogicalGet &get, FunctionData *bind_data, 
 			continue;
 		}
 
-		const auto lhs_kind = func.children[0]->GetExpressionType();
-		const auto rhs_kind = func.children[1]->GetExpressionType();
+		const auto lhs_kind = func.GetChildren()[0]->GetExpressionType();
+		const auto rhs_kind = func.GetChildren()[1]->GetExpressionType();
 
 		const auto lhs_is_const = lhs_kind == ExpressionType::VALUE_CONSTANT;
 		const auto rhs_is_const = rhs_kind == ExpressionType::VALUE_CONSTANT;
@@ -780,8 +956,8 @@ auto Pushdown(ClientContext &context, LogicalGet &get, FunctionData *bind_data, 
 			continue;
 		}
 
-		auto &constant_expr = func.children[lhs_is_const ? 0 : 1]->Cast<BoundConstantExpression>();
-		auto &geometry_expr = func.children[lhs_is_const ? 1 : 0];
+		auto &constant_expr = func.GetChildren()[lhs_is_const ? 0 : 1]->Cast<BoundConstantExpression>();
+		auto &geometry_expr = func.GetChildren()[lhs_is_const ? 1 : 0];
 
 		auto found_geom_expr = false;
 		auto multi_geom_expr = false;
@@ -791,13 +967,13 @@ auto Pushdown(ClientContext &context, LogicalGet &get, FunctionData *bind_data, 
 				    multi_geom_expr = true;
 				    return;
 			    }
-			    if (ref.binding.table_index != get.table_index) {
+			    if (ref.Binding().table_index != get.table_index) {
 				    // Not from the same table
 				    return;
 			    }
 
 			    const auto &col_ids = get.GetColumnIds();
-			    const auto &col = col_ids[ref.binding.column_index];
+			    const auto &col = col_ids[ref.Binding().column_index];
 
 			    if (!col.HasPrimaryIndex()) {
 				    return;
@@ -813,21 +989,21 @@ auto Pushdown(ClientContext &context, LogicalGet &get, FunctionData *bind_data, 
 			continue;
 		}
 
-		if (constant_expr.value.type().id() != LogicalTypeId::GEOMETRY) {
+		if (constant_expr.GetValue().type().id() != LogicalTypeId::GEOMETRY) {
 			// Constant is not geometry
 			continue;
 		}
-		if (constant_expr.value.IsNull()) {
+		if (constant_expr.GetValue().IsNull()) {
 			// Constant is NULL
 			continue;
 		}
-		if (geometry_expr->return_type.id() != LogicalTypeId::GEOMETRY) {
+		if (geometry_expr->GetReturnType().id() != LogicalTypeId::GEOMETRY) {
 			// Not the geometry column
 			continue;
 		}
 
 		auto geom_extent = GeometryExtent::Empty();
-		auto geom_binary = string_t(StringValue::Get(constant_expr.value));
+		auto geom_binary = string_t(StringValue::Get(constant_expr.GetValue()));
 
 		if (Geometry::GetExtent(geom_binary, geom_extent)) {
 			bdata.has_filter = true;
@@ -841,7 +1017,7 @@ auto Pushdown(ClientContext &context, LogicalGet &get, FunctionData *bind_data, 
 		// We can __ONLY__ do this if the filter predicate is "&&" or "st_intersects_extent"
 		// as other predicates may require exact geometry evaluation, the filter cannot be fully removed
 		for (auto &name : {"&&", "ST_Intersects_Extent"}) {
-			if (StringUtil::CIEquals(func.function.name.c_str(), name)) {
+			if (StringUtil::CIEquals(func.Function().GetName().c_str(), name)) {
 				geom_filter_idx = expr_idx;
 				break;
 			}
@@ -862,20 +1038,25 @@ auto Pushdown(ClientContext &context, LogicalGet &get, FunctionData *bind_data, 
 class GlobalState final : public GlobalTableFunctionState {
 public:
 	~GlobalState() override {
+		if (stream.release) {
+			stream.release(&stream);
+		}
+
+		if (schema.release) {
+			schema.release(&schema);
+		}
+
 		if (dataset) {
 			GDALClose(dataset);
 			dataset = nullptr;
 		}
-
-		if (stream.release) {
-			stream.release(&stream);
-		}
 	}
 
-	GDALDatasetH dataset;
+	GDALDatasetH dataset = nullptr;
 	CPLStringList layer_options;
-	OGRLayerH layer;
-	ArrowArrayStream stream;
+	OGRLayerH layer = nullptr;
+	ArrowArrayStream stream = {};
+	ArrowSchema schema = {};
 	vector<unique_ptr<ArrowType>> col_types;
 	atomic<idx_t> features_read = {0};
 };
@@ -887,7 +1068,7 @@ auto InitGlobal(ClientContext &context, TableFunctionInitInput &input) -> unique
 	                                bdata.dataset_drivers, bdata.dataset_options, bdata.dataset_sibling);
 
 	if (!dataset) {
-		throw IOException("Could not open GDAL dataset at: %s", bdata.real_file_path);
+		ThrowGDALError(StringUtil::Format("Could not open GDAL dataset at: %s", bdata.real_file_path));
 	}
 
 	auto result = make_uniq<GlobalState>();
@@ -916,6 +1097,10 @@ auto InitGlobal(ClientContext &context, TableFunctionInitInput &input) -> unique
 		}
 	}
 
+	if (!result->layer) {
+		throw IOException("Could not get GDAL layer at: %s", bdata.real_file_path);
+	}
+
 	// Set the filter, if we got one
 	if (bdata.has_filter) {
 		OGR_L_SetSpatialFilterRect(result->layer, bdata.layer_filter.MinX, bdata.layer_filter.MinY,
@@ -928,20 +1113,16 @@ auto InitGlobal(ClientContext &context, TableFunctionInitInput &input) -> unique
 
 	// Open the Arrow stream
 	if (!OGR_L_GetArrowStream(result->layer, &result->stream, result->layer_options.List())) {
-		GDALClose(dataset);
-		throw IOException("Could not get GDAL Arrow stream");
+		ThrowGDALError("Could not get GDAL Arrow stream");
 	}
 
-	ArrowSchema schema;
-	if (result->stream.get_schema(&result->stream, &schema) != 0) {
-		result->stream.release(&result->stream);
-		GDALClose(dataset);
+	if (result->stream.get_schema(&result->stream, &result->schema) != 0) {
 		throw IOException("Could not get GDAL Arrow schema");
 	}
 
 	// Store the column types
-	for (int64_t i = 0; i < schema.n_children; i++) {
-		auto &child_schema = *schema.children[i];
+	for (int64_t i = 0; i < result->schema.n_children; i++) {
+		auto &child_schema = *result->schema.children[i];
 		result->col_types.push_back(ArrowType::GetTypeFromSchema(context, child_schema));
 	}
 
@@ -992,6 +1173,7 @@ void Scan(ClientContext &context, TableFunctionInput &input, DataChunk &output) 
 		default:
 			throw NotImplementedException("ArrowArrayPhysicalType not recognized");
 		}
+		FlatVector::SetSize(vec, count_t(arrow_array.length));
 	}
 
 	state.features_read += arrow_array.length;
@@ -1090,7 +1272,7 @@ auto ReplacementScan(ClientContext &, ReplacementScanInput &input, optional_ptr<
 
 		auto table_function = make_uniq<TableFunctionRef>();
 		vector<unique_ptr<ParsedExpression>> children;
-		children.push_back(make_uniq<ConstantExpression>(Value(table_name)));
+		children.push_back(ConstantExpression::FromValue(Value(table_name)));
 		table_function->function = make_uniq<FunctionExpression>("ST_Read", std::move(children));
 		return std::move(table_function);
 	}
@@ -1166,19 +1348,23 @@ static constexpr auto EXAMPLE = R"(
 	)";
 
 void Register(ExtensionLoader &loader) {
-	TableFunction read_func("ST_Read", {LogicalType::VARCHAR}, Scan, Bind, InitGlobal);
+	FunctionSignature signature;
+	signature.AddParameter("file_name", LogicalType::VARCHAR).WithTypedKwargs("options", [&](TypedKwargs &options) {
+		options.Add("open_options", LogicalType::LIST(LogicalType::VARCHAR))
+		    .Add("allowed_drivers", LogicalType::LIST(LogicalType::VARCHAR))
+		    .Add("sibling_files", LogicalType::LIST(LogicalType::VARCHAR))
+		    .Add("layer", LogicalType::VARCHAR)
+		    .Add("max_batch_size", LogicalType::INTEGER)
+		    .Add("keep_wkb", LogicalType::BOOLEAN);
+	});
+
+	TableFunction read_func("ST_Read", std::move(signature), Scan, Bind, InitGlobal);
 	read_func.cardinality = Cardinality;
 	read_func.statistics = Statistics;
 	read_func.table_scan_progress = Progress;
 	read_func.pushdown_complex_filter = Pushdown;
 	read_func.to_string = ToString;
-
-	read_func.named_parameters["open_options"] = LogicalType::LIST(LogicalType::VARCHAR);
-	read_func.named_parameters["allowed_drivers"] = LogicalType::LIST(LogicalType::VARCHAR);
-	read_func.named_parameters["sibling_files"] = LogicalType::LIST(LogicalType::VARCHAR);
-	read_func.named_parameters["layer"] = LogicalType::VARCHAR;
-	read_func.named_parameters["max_batch_size"] = LogicalType::INTEGER;
-	read_func.named_parameters["keep_wkb"] = LogicalType::BOOLEAN;
+	read_func.parallelism = TableFunctionParallelism::SEQUENTIAL;
 
 	loader.RegisterFunction(read_func);
 
@@ -1220,6 +1406,35 @@ public:
 	ArrowSchema schema;
 	unordered_map<idx_t, const shared_ptr<ArrowTypeExtensionData>> extension_type_cast;
 
+	BindData() : geometry_type(wkbUnknown) {
+		schema.release = nullptr;
+	}
+
+	// Move constructor
+	BindData(BindData &&other) noexcept
+	    : driver_name(std::move(other.driver_name)), layer_name(std::move(other.layer_name)),
+	      driver_options(std::move(other.driver_options)), layer_options(std::move(other.layer_options)),
+	      target_srs(std::move(other.target_srs)), always_xy(other.always_xy), geometry_type(other.geometry_type),
+	      props(std::move(other.props)), schema(other.schema),
+	      extension_type_cast(std::move(other.extension_type_cast)) {
+		other.schema.release = nullptr;
+	}
+
+	// Move assignment operator
+	BindData &operator=(BindData &&other) noexcept {
+		std::swap(driver_name, other.driver_name);
+		std::swap(layer_name, other.layer_name);
+		std::swap(driver_options, other.driver_options);
+		std::swap(layer_options, other.layer_options);
+		std::swap(target_srs, other.target_srs);
+		std::swap(always_xy, other.always_xy);
+		std::swap(geometry_type, other.geometry_type);
+		std::swap(props, other.props);
+		std::swap(schema, other.schema);
+		std::swap(extension_type_cast, other.extension_type_cast);
+		return *this;
+	}
+
 	~BindData() override {
 		if (schema.release) {
 			schema.release(&schema);
@@ -1227,8 +1442,8 @@ public:
 	}
 };
 
-bool MatchOption(const char *name, const pair<string, vector<Value>> &option, bool list = false) {
-	if (StringUtil::CIEquals(name, option.first)) {
+bool MatchOption(const char *name, const pair<const Identifier, vector<Value>> &option, bool list = false) {
+	if (option.first == name) {
 		if (option.second.empty()) {
 			throw BinderException("GDAL COPY option '%s' requires a value", name);
 		}
@@ -1251,7 +1466,7 @@ bool MatchOption(const char *name, const pair<string, vector<Value>> &option, bo
 	return false;
 }
 
-auto Bind(ClientContext &context, CopyFunctionBindInput &input, const vector<string> &names,
+auto Bind(ClientContext &context, CopyFunctionBindInput &input, const vector<Identifier> &names,
           const vector<LogicalType> &sql_types) -> unique_ptr<FunctionData> {
 	auto result = make_uniq<BindData>();
 
@@ -1361,13 +1576,13 @@ auto Bind(ClientContext &context, CopyFunctionBindInput &input, const vector<str
 		throw BinderException("Could not find GDAL driver: " + result->driver_name);
 	}
 
-	// Try to get the file extension from the driver
+	// Try to get the file extension from the driver.
+	// GDAL_DMD_EXTENSIONS may hold a space-separated list, so take the first entry.
+	// Some drivers (e.g. MapML, GeoRSS) declare no extension and return NULL here,
+	// so guard before constructing a std::string from it.
 	const auto file_ext = GDALGetMetadataItem(driver, GDAL_DMD_EXTENSIONS, nullptr);
 	if (file_ext) {
-		input.file_extension = file_ext;
-	} else {
-		const auto file_exts = GDALGetMetadataItem(driver, GDAL_DMD_EXTENSIONS, nullptr);
-		const auto exts = StringUtil::Split(file_exts, ' ');
+		const auto exts = StringUtil::Split(file_ext, ' ');
 		if (!exts.empty()) {
 			input.file_extension = exts[0];
 		}
@@ -1381,7 +1596,7 @@ auto Bind(ClientContext &context, CopyFunctionBindInput &input, const vector<str
 	// Setup arrow schema
 	result->props = context.GetClientProperties();
 	result->extension_type_cast = duckdb::ArrowTypeExtensionData::GetExtensionTypes(context, sql_types);
-	ArrowConverter::ToArrowSchema(&result->schema, sql_types, names, result->props);
+	ArrowConverter::ToArrowSchema(&result->schema, sql_types, IdentifiersToStrings(names), result->props);
 
 	return std::move(result);
 }
@@ -1391,21 +1606,47 @@ auto Bind(ClientContext &context, CopyFunctionBindInput &input, const vector<str
 //----------------------------------------------------------------------------------------------------------------------
 class GlobalState final : public GlobalFunctionData {
 public:
+	GlobalState() {
+		dataset = nullptr;
+		layer = nullptr;
+		srs = nullptr;
+	}
+
+	// Move constructor
+	GlobalState(GlobalState &&other) noexcept
+	    : file_path(std::move(other.file_path)), dataset(other.dataset), layer(other.layer), srs(other.srs) {
+		other.dataset = nullptr;
+		other.layer = nullptr;
+		other.srs = nullptr;
+	}
+
+	// Move assignment operator
+	GlobalState &operator=(GlobalState &&other) noexcept {
+		std::swap(file_path, other.file_path);
+		std::swap(dataset, other.dataset);
+		std::swap(layer, other.layer);
+		std::swap(srs, other.srs);
+		return *this;
+	}
+
 	~GlobalState() override {
 		if (dataset) {
 			GDALClose(dataset);
 			dataset = nullptr;
 		}
 		if (srs) {
-			OSRDestroySpatialReference(srs);
+			OSRRelease(srs);
 			srs = nullptr;
 		}
 	}
 
 	mutex lock;
-	GDALDatasetH dataset = nullptr;
-	OGRLayerH layer = nullptr;
-	OGRSpatialReferenceH srs = nullptr;
+	// The path the dataset was created at, which DuckDB rewrites to a temporary "tmp_*" name when copying
+	// over an existing file.
+	string file_path;
+	GDALDatasetH dataset;
+	OGRLayerH layer;
+	OGRSpatialReferenceH srs;
 };
 
 auto InitGlobal(ClientContext &context, FunctionData &bdata_p, const string &real_file_path)
@@ -1421,10 +1662,12 @@ auto InitGlobal(ClientContext &context, FunctionData &bdata_p, const string &rea
 	const auto &file_prefix = DuckDBFileSystemPrefix::GetOrCreate(context);
 	const auto gdal_file_path = file_prefix.AddPrefix(real_file_path);
 
+	result->file_path = real_file_path;
+
 	// Create Dataset
 	result->dataset = GDALCreate(driver, gdal_file_path.c_str(), 0, 0, 0, GDT_Unknown, bdata.driver_options);
 	if (!result->dataset) {
-		throw IOException("Could not create GDAL dataset at: " + real_file_path);
+		ThrowGDALError("Could not create GDAL dataset at: " + real_file_path);
 	}
 
 	if (!bdata.target_srs.empty()) {
@@ -1465,7 +1708,7 @@ auto InitGlobal(ClientContext &context, FunctionData &bdata_p, const string &rea
 	                                       bdata.layer_options);
 
 	if (!result->layer) {
-		throw IOException("Could not create GDAL layer in dataset at: " + real_file_path);
+		ThrowGDALError("Could not create GDAL layer in dataset at: " + real_file_path);
 	}
 
 	// Create fields for all children
@@ -1491,7 +1734,7 @@ auto InitGlobal(ClientContext &context, FunctionData &bdata_p, const string &rea
 
 		// Register normal attribute
 		if (!OGR_L_CreateFieldFromArrowSchema(result->layer, child_schema, nullptr)) {
-			throw IOException("Could not create field in GDAL layer for column: " + string(child_schema->name));
+			ThrowGDALError("Could not create field in GDAL layer for column: " + string(child_schema->name));
 		}
 	}
 
@@ -1503,6 +1746,21 @@ auto InitGlobal(ClientContext &context, FunctionData &bdata_p, const string &rea
 //----------------------------------------------------------------------------------------------------------------------
 class LocalState final : public LocalFunctionData {
 public:
+	LocalState() {
+		array.release = nullptr;
+	}
+
+	// Move constructor
+	LocalState(LocalState &&other) noexcept : array(other.array) {
+		other.array.release = nullptr;
+	}
+
+	// Move assignment operator
+	LocalState &operator=(LocalState &&other) noexcept {
+		std::swap(array, other.array);
+		return *this;
+	}
+
 	~LocalState() override {
 		if (array.release) {
 			array.release(&array);
@@ -1538,8 +1796,9 @@ void Sink(ExecutionContext &context, FunctionData &bdata_p, GlobalFunctionData &
 		// Lock
 		lock_guard<mutex> guard(gstate.lock);
 
-		// Sink into GDAL
-		OGR_L_WriteArrowBatch(gstate.layer, &arrow_schema, &arrow_array, nullptr);
+		if (!OGR_L_WriteArrowBatch(gstate.layer, &arrow_schema, &arrow_array, nullptr)) {
+			ThrowGDALError("Could not write Arrow batch to GDAL layer");
+		}
 	}
 
 	// Release the array
@@ -1563,10 +1822,53 @@ void Combine(ExecutionContext &context, FunctionData &bind_data, GlobalFunctionD
 void Finalize(ClientContext &context, FunctionData &bind_data, GlobalFunctionData &gstate_p) {
 	auto &gstate = gstate_p.Cast<GlobalState>();
 
-	// Flush and close the dataset
-	GDALFlushCache(gstate.dataset);
-	GDALClose(gstate.dataset);
+	// Some drivers spread a single dataset over several files, such as the .shx, .dbf and .prj sidecars of
+	// an ESRI Shapefile. When copying over an existing file, DuckDB rewrites the output path to a "tmp_*"
+	// name and renames only that one file back after this function returns, which would leave the sidecars
+	// of this dataset behind under their temporary name while the previous export keeps its own. Look up
+	// which files belong to this dataset while it is still open so they can be renamed below.
+	vector<string> sidecar_files;
+	const auto tmp_file_name = StringUtil::GetFileName(gstate.file_path);
+	if (StringUtil::StartsWith(tmp_file_name, "tmp_")) {
+		auto file_list = GDALGetFileList(gstate.dataset);
+		if (file_list) {
+			for (auto i = 0; file_list[i]; i++) {
+				const auto file_name = StringUtil::GetFileName(file_list[i]);
+				if (file_name != tmp_file_name && StringUtil::StartsWith(file_name, "tmp_")) {
+					sidecar_files.emplace_back(file_name);
+				}
+			}
+			CSLDestroy(file_list);
+		}
+	}
+
+	// Flush and close the dataset. If a flush fails we leave gstate.dataset set so the GlobalState destructor still
+	// closes it during unwinding.
+	if (GDALFlushCache(gstate.dataset) != CE_None) {
+		ThrowGDALError("Could not flush GDAL dataset");
+	}
+
+	// GDALClose frees the dataset even on error, so clear the handle before checking to avoid a double close.
+	const auto close_err = GDALClose(gstate.dataset);
 	gstate.dataset = nullptr;
+	if (close_err != CE_None) {
+		ThrowGDALError("Could not close GDAL dataset");
+	}
+
+	// Rename the remaining files of the dataset so that the output is a complete dataset again. The main
+	// file is left alone, as DuckDB renames that one itself once this function has returned. Drivers may
+	// report components they did not actually create, so skip the ones that are not on disk.
+	if (!sidecar_files.empty()) {
+		auto &fs = FileSystem::GetFileSystem(context);
+		const auto dir = StringUtil::GetFilePath(gstate.file_path);
+		for (const auto &file_name : sidecar_files) {
+			const auto source = fs.JoinPath(dir, file_name);
+			if (!fs.FileExists(source)) {
+				continue;
+			}
+			fs.MoveFile(source, fs.JoinPath(dir, file_name.substr(4)));
+		}
+	}
 }
 
 CopyFunctionExecutionMode Mode(bool preserve_insertion_order, bool use_batch_index) {
@@ -1611,7 +1913,7 @@ public:
 	idx_t driver_count;
 };
 
-auto Bind(ClientContext &context, TableFunctionBindInput &input, vector<LogicalType> &types, vector<string> &names)
+auto Bind(ClientContext &context, TableFunctionBindInput &input, vector<LogicalType> &types, vector<Identifier> &names)
     -> unique_ptr<FunctionData> {
 
 	types.emplace_back(LogicalType::VARCHAR);
@@ -1691,7 +1993,7 @@ void Scan(ClientContext &context, TableFunctionInput &input, DataChunk &output) 
 		output.data[5].SetValue(count, help_topic_value);
 		count++;
 	}
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 //----------------------------------------------------------------------------------------------------------------------
@@ -1769,7 +2071,7 @@ LogicalType GetLayerType() {
 	});
 }
 
-auto Bind(ClientContext &context, TableFunctionBindInput &input, vector<LogicalType> &types, vector<string> &names)
+auto Bind(ClientContext &context, TableFunctionBindInput &input, vector<LogicalType> &types, vector<Identifier> &names)
     -> unique_ptr<FunctionData> {
 	names.push_back("file_name");
 	names.push_back("driver_short_name");
@@ -1781,11 +2083,29 @@ auto Bind(ClientContext &context, TableFunctionBindInput &input, vector<LogicalT
 	types.push_back(LogicalType::VARCHAR);
 	types.push_back(LogicalType::LIST(GetLayerType()));
 
-	const auto mf_reader = MultiFileReader::Create(input.table_function);
-	const auto mf_inputs = mf_reader->CreateFileList(context, input.inputs[0], FileGlobOptions::ALLOW_EMPTY);
-
 	auto result = make_uniq<BindData>();
-	result->files = mf_inputs->GetAllFiles();
+
+	// For /vsi* paths and GDAL driver-prefixed URLs (e.g., "WFS:https://..."),
+	// bypass MultiFileReader since these are not local file globs.
+	// We must check the input type first because MultiFileReader::CreateFunctionSet
+	// adds a VARCHAR[] overload, and GetValue<string>() on a LIST would return
+	// the string representation of the list, not an actual path.
+	auto &input_val = input.inputs[0];
+	if (input_val.type().id() == LogicalTypeId::VARCHAR) {
+		auto raw_path = input_val.GetValue<string>();
+		if (StringUtil::StartsWith(raw_path, "/vsi") || DuckDBFileSystemPrefix::IsGDALDriverPrefixedURL(raw_path)) {
+			result->files.emplace_back(std::move(raw_path));
+		} else {
+			const auto mf_reader = MultiFileReader::Create(input.table_function);
+			const auto mf_inputs = mf_reader->CreateFileList(context, input_val, FileGlobOptions::ALLOW_EMPTY);
+			result->files = mf_inputs->GetAllFiles();
+		}
+	} else {
+		const auto mf_reader = MultiFileReader::Create(input.table_function);
+		const auto mf_inputs = mf_reader->CreateFileList(context, input_val, FileGlobOptions::ALLOW_EMPTY);
+		result->files = mf_inputs->GetAllFiles();
+	}
+
 	return std::move(result);
 }
 
@@ -1899,6 +2219,10 @@ void Scan(ClientContext &context, TableFunctionInput &input, DataChunk &output) 
 			// Just skip anything we cant open
 			continue;
 		}
+		if (!dataset) {
+			// Open returns null when the error handler doesnt throw
+			continue;
+		}
 
 		output.data[0].SetValue(output_idx, file.path);
 		output.data[1].SetValue(output_idx, dataset->GetDriver()->GetDescription());
@@ -1908,7 +2232,7 @@ void Scan(ClientContext &context, TableFunctionInput &input, DataChunk &output) 
 		output_idx++;
 	}
 
-	output.SetCardinality(output_idx);
+	output.SetChildCardinality(output_idx);
 }
 
 //----------------------------------------------------------------------------------------------------------------------
@@ -1930,7 +2254,8 @@ static constexpr auto EXAMPLE = R"(
 	)";
 
 static void Register(ExtensionLoader &loader) {
-	const TableFunction func("ST_Read_Meta", {LogicalType::VARCHAR}, Scan, Bind, InitGlobal);
+	const TableFunction func("ST_Read_Meta", FunctionSignature().AddPositionalOnly("path", LogicalType::VARCHAR), Scan,
+	                         Bind, InitGlobal);
 	loader.RegisterFunction(MultiFileReader::CreateFunctionSet(func));
 
 	InsertionOrderPreservingMap<string> tags;
@@ -1950,49 +2275,19 @@ void RegisterGDALModule(ExtensionLoader &loader) {
 		// Register all embedded drivers (dont go looking for plugins)
 		OGRRegisterAllInternal();
 
-		// Set GDAL error handler
+		// GDAL error handler. For ordinary failures we MUST NOT throw from here: GDAL is not exception-safe and an
+		// exception thrown from the handler unwinds through GDAL's own frames, leaking memory and potentially
+		// corrupting its state. Those are recorded in GDAL's thread-local state (CPLGetLastError*) and surfaced at our
+		// call boundaries via ThrowGDALError().
+		//
+		// CE_Fatal is the exception: GDAL would otherwise abort() the whole process right after the handler returns.
+		// Throwing here pre-empts that abort and lets DuckDB invalidate the database instead of hard-crashing. We
+		// accept the risk of unwinding through GDAL on a fatal error since the process was going to die regardless.
 		CPLSetErrorHandler([](CPLErr e, int code, const char *raw_msg) {
-			// DuckDB doesn't do warnings, so we only throw on errors
-			if (e != CE_Failure && e != CE_Fatal) {
-				return;
+			if (e == CE_Fatal) {
+				throw InternalException("Fatal GDAL error: " + CleanGDALMessage(raw_msg));
 			}
-
-			// GDAL Catches exceptions internally and passes them on to the handler again as CPLE_AppDefined
-			// So we don't add any extra information here or we end up with very long nested error messages.
-			// Using ErrorData we can parse the message part of DuckDB exceptions properly, and for other exceptions
-			// their error message will still be preserved as the "raw message".
-			ErrorData error_data(raw_msg);
-			auto msg = error_data.RawMessage();
-
-			// If the error contains a /vsiduckdb-<uuid>/ prefix,
-			// try to strip it off to make the errors more readable
-			auto path_pos = msg.find("/vsiduckdb-");
-			if (path_pos != string::npos) {
-				// We found a path, strip it off
-				msg.erase(path_pos, 48);
-			}
-
-			switch (code) {
-			case CPLE_NoWriteAccess:
-				throw PermissionException(msg);
-			case CPLE_UserInterrupt:
-				throw InterruptException();
-			case CPLE_OutOfMemory:
-				throw OutOfMemoryException(msg);
-			case CPLE_NotSupported:
-				throw NotImplementedException(msg);
-			case CPLE_AssertionFailed:
-			case CPLE_ObjectNull:
-				throw InternalException(msg);
-			case CPLE_IllegalArg:
-				throw InvalidInputException(msg);
-			case CPLE_AppDefined:
-			case CPLE_HttpResponse:
-			case CPLE_FileIO:
-			case CPLE_OpenFailed:
-			default:
-				throw IOException(msg);
-			}
+			// Otherwise a no-op: the error is captured in GDAL's thread-local state and surfaced at the boundary.
 		});
 	});
 

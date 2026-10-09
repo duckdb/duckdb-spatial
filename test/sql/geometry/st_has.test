@@ -8,74 +8,74 @@ foreach FUNCTION ST_GeomFromText() ST_GeomFromText().ST_AsWKB()::WKB_BLOB
 
 # HasZ for a 2D geometry
 query I
-SELECT ST_HasZ(('POINT(1 1)').${FUNCTION});
+SELECT ST_HasZ(('POINT(1 1)').{FUNCTION});
 ----
 false
 
 # HasZ for a 3DZ geometry
 query I
-SELECT ST_HasZ(('POINT Z(1 1 1)').${FUNCTION});
+SELECT ST_HasZ(('POINT Z(1 1 1)').{FUNCTION});
 ----
 true
 
 # HasZ for a 3DM geometry
 query I
-SELECT ST_HasZ(('POINT M(1 1 1)').${FUNCTION});
+SELECT ST_HasZ(('POINT M(1 1 1)').{FUNCTION});
 ----
 false
 
 # HasZ for a 4D geometry
 query I
-SELECT ST_HasZ(('POINT ZM(1 1 1 1)').${FUNCTION});
+SELECT ST_HasZ(('POINT ZM(1 1 1 1)').{FUNCTION});
 ----
 true
 
 # HasM for a 2D geometry
 query I
-SELECT ST_HasM(('POINT(1 1)').${FUNCTION});
+SELECT ST_HasM(('POINT(1 1)').{FUNCTION});
 ----
 false
 
 # HasM for a 3DZ geometry
 query I
-SELECT ST_HasM(('POINT Z(1 1 1)').${FUNCTION});
+SELECT ST_HasM(('POINT Z(1 1 1)').{FUNCTION});
 ----
 false
 
 # HasM for a 3DM geometry
 query I
-SELECT ST_HasM(('POINT M(1 1 1)').${FUNCTION});
+SELECT ST_HasM(('POINT M(1 1 1)').{FUNCTION});
 ----
 true
 
 # HasM for a 4D geometry
 query I
-SELECT ST_HasM(('POINT ZM(1 1 1 1)').${FUNCTION});
+SELECT ST_HasM(('POINT ZM(1 1 1 1)').{FUNCTION});
 ----
 true
 
 # ZMFlag for a 2D geometry
 query I
-SELECT ST_ZMFlag(('POINT(1 1)').${FUNCTION});
+SELECT ST_ZMFlag(('POINT(1 1)').{FUNCTION});
 ----
 0
 
 
 # ZMFlag for a 3DZ geometry
 query I
-SELECT ST_ZMFlag(('POINT Z(1 1 1)').${FUNCTION});
+SELECT ST_ZMFlag(('POINT Z(1 1 1)').{FUNCTION});
 ----
 2
 
 # ZMFlag for a 3DM geometry
 query I
-SELECT ST_ZMFlag(('POINT M(1 1 1)').${FUNCTION});
+SELECT ST_ZMFlag(('POINT M(1 1 1)').{FUNCTION});
 ----
 1
 
 # ZMFlag for a 4D geometry
 query I
-SELECT ST_ZMFlag(('POINT ZM(1 1 1 1)').${FUNCTION});
+SELECT ST_ZMFlag(('POINT ZM(1 1 1 1)').{FUNCTION});
 ----
 3
 

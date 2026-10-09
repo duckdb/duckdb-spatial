@@ -1,7 +1,7 @@
-require spatial
+# name: test/sql/index/rtree_empty.test
+# group: [index]
 
-statement ok
-PRAGMA enable_verification;
+require spatial
 
 statement ok
 CREATE TABLE t1(i INT, g GEOMETRY);

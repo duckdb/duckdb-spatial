@@ -1,0 +1,66 @@
+# name: test/sql/index/rtree_concurrent_delete.test
+# description: An R-tree index scan must not lose rows that were deleted (or updated) by a transaction that committed
+#              after the scanning transaction started, as those are removed from the index right away.
+# group: [index]
+
+require spatial
+
+statement ok
+SET profiling_renderer_settings = MAP {'operator_casing': 'upper'};
+
+statement ok
+CREATE TABLE t AS SELECT i AS id, ST_Point(i, i)::GEOMETRY AS geom FROM range(1000) r(i);
+
+statement ok
+CREATE INDEX idx ON t USING RTREE (geom);
+
+query II
+EXPLAIN SELECT id FROM t WHERE ST_Intersects(geom, ST_MakeEnvelope(0, 0, 5, 5));
+----
+physical_plan	<REGEX>:.*RTREE_INDEX_SCAN.*
+
+statement ok con1
+BEGIN TRANSACTION
+
+query I con1
+SELECT count(*) FROM t WHERE ST_Intersects(geom, ST_MakeEnvelope(0, 0, 5, 5));
+----
+6
+
+# A concurrent transaction deletes a matching row and commits while con1 is still active
+statement ok con2
+DELETE FROM t WHERE id = 3;
+
+# con1's snapshot predates the delete, so it must still see the row
+query I con1
+SELECT count(*) FROM t WHERE ST_Intersects(geom, ST_MakeEnvelope(0, 0, 5, 5));
+----
+6
+
+query I con1
+SELECT list(id ORDER BY id) FROM t WHERE ST_Intersects(geom, ST_MakeEnvelope(0, 0, 5, 5));
+----
+[0, 1, 2, 3, 4, 5]
+
+# Same for an update of the indexed geometry
+statement ok con2
+UPDATE t SET geom = ST_Point(500, 500) WHERE id = 4;
+
+query I con1
+SELECT list(id ORDER BY id) FROM t WHERE ST_Intersects(geom, ST_MakeEnvelope(0, 0, 5, 5));
+----
+[0, 1, 2, 3, 4, 5]
+
+statement ok con1
+COMMIT
+
+# A new transaction sees the changes
+query I con1
+SELECT list(id ORDER BY id) FROM t WHERE ST_Intersects(geom, ST_MakeEnvelope(0, 0, 5, 5));
+----
+[0, 1, 2, 5]
+
+query I
+SELECT list(id ORDER BY id) FROM t WHERE ST_Intersects(geom, ST_MakeEnvelope(499, 499, 501, 501));
+----
+[4, 499, 500, 501]

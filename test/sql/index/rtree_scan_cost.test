@@ -1,0 +1,145 @@
+# name: test/sql/index/rtree_scan_cost.test
+# group: [index]
+
+# Test that the optimizer only rewrites spatial predicates into an R-tree index scan when the
+# predicate is estimated (by walking the top of the R-tree) to be selective enough, and keeps the
+# regular (filter-pushdown capable) table scan otherwise.
+require spatial
+
+statement ok
+SET profiling_renderer_settings = MAP {'operator_casing': 'upper'};
+
+# 50k uniform points: large enough to clear the rtree_index_scan_min_rows floor
+statement ok
+CREATE TABLE t1 AS SELECT point::GEOMETRY AS geom
+FROM st_generatepoints({min_x: 0, min_y: 0, max_x: 1000, max_y: 1000}::BOX_2D, 50_000, 42);
+
+statement ok
+CREATE INDEX t1_idx ON t1 USING RTREE (geom);
+
+# A narrow predicate (~0.01% of rows) uses the index scan
+query II
+EXPLAIN SELECT count(*) FROM t1 WHERE ST_Within(geom, ST_MakeEnvelope(500, 500, 510, 510));
+----
+physical_plan	<REGEX>:.*RTREE_INDEX_SCAN.*
+
+# A broad predicate (~36% of rows) keeps the regular table scan
+query II
+EXPLAIN SELECT count(*) FROM t1 WHERE ST_Within(geom, ST_MakeEnvelope(100, 100, 700, 700));
+----
+physical_plan	<!REGEX>:.*RTREE_INDEX_SCAN.*
+
+# ...and still returns correct results through it
+query I
+SELECT count(*) = (SELECT count(*) FROM t1 WHERE ST_X(geom) BETWEEN 100 AND 700 AND ST_Y(geom) BETWEEN 100 AND 700)
+FROM t1 WHERE ST_Within(geom, ST_MakeEnvelope(100, 100, 700, 700));
+----
+true
+
+# ST_DWithin with a constant geometry and distance also uses the index when selective
+query II
+EXPLAIN SELECT count(*) FROM t1 WHERE ST_DWithin(geom, ST_Point(500, 500), 5);
+----
+physical_plan	<REGEX>:.*RTREE_INDEX_SCAN.*
+
+# ...in either geometry argument order
+query II
+EXPLAIN SELECT count(*) FROM t1 WHERE ST_DWithin(ST_Point(500, 500), geom, 5);
+----
+physical_plan	<REGEX>:.*RTREE_INDEX_SCAN.*
+
+# ...and returns the same rows as the exact distance computation
+query I
+SELECT count(*) = (SELECT count(*) FROM t1 WHERE ST_Distance(geom, ST_Point(500, 500)) <= 5)
+FROM t1 WHERE ST_DWithin(geom, ST_Point(500, 500), 5);
+----
+true
+
+# A distance covering most of the table keeps the regular table scan
+query II
+EXPLAIN SELECT count(*) FROM t1 WHERE ST_DWithin(geom, ST_Point(500, 500), 500);
+----
+physical_plan	<!REGEX>:.*RTREE_INDEX_SCAN.*
+
+# A non-constant distance cannot use the index
+query II
+EXPLAIN SELECT count(*) FROM t1 WHERE ST_DWithin(geom, ST_Point(500, 500), ST_X(geom));
+----
+physical_plan	<!REGEX>:.*RTREE_INDEX_SCAN.*
+
+# The decision is based on estimated rows, not bounding-box area: on clustered data a small envelope
+# over the dense cluster matches most rows and keeps the table scan
+statement ok
+CREATE TABLE t2 AS SELECT geom FROM (
+	SELECT point::GEOMETRY AS geom FROM st_generatepoints({min_x: 475, min_y: 475, max_x: 525, max_y: 525}::BOX_2D, 45_000, 1)
+	UNION ALL
+	SELECT point::GEOMETRY AS geom FROM st_generatepoints({min_x: 0, min_y: 0, max_x: 1000, max_y: 1000}::BOX_2D, 5_000, 2)
+) ORDER BY random();
+
+statement ok
+CREATE INDEX t2_idx ON t2 USING RTREE (geom);
+
+# ~0.16% of the extent area, but ~90% of the rows: no index scan
+query II
+EXPLAIN SELECT count(*) FROM t2 WHERE ST_Within(geom, ST_MakeEnvelope(480, 480, 520, 520));
+----
+physical_plan	<!REGEX>:.*RTREE_INDEX_SCAN.*
+
+# The same-sized envelope over a sparse region uses the index
+query II
+EXPLAIN SELECT count(*) FROM t2 WHERE ST_Within(geom, ST_MakeEnvelope(130, 130, 170, 170));
+----
+physical_plan	<REGEX>:.*RTREE_INDEX_SCAN.*
+
+# Below the min_rows floor the index is always used, regardless of selectivity
+statement ok
+CREATE TABLE t3 AS SELECT point::GEOMETRY AS geom
+FROM st_generatepoints({min_x: 0, min_y: 0, max_x: 1000, max_y: 1000}::BOX_2D, 1000, 3);
+
+statement ok
+CREATE INDEX t3_idx ON t3 USING RTREE (geom);
+
+query II
+EXPLAIN SELECT count(*) FROM t3 WHERE ST_Within(geom, ST_MakeEnvelope(0, 0, 1000, 1000));
+----
+physical_plan	<REGEX>:.*RTREE_INDEX_SCAN.*
+
+# The default rtree_index_scan_ratio (7.5%) only decides for tables large enough that
+# ratio * rows exceeds the min-rows floor (8192), i.e. above ~109k rows. On 200k uniform rows the
+# threshold is 15k rows: a ~5% predicate (~10k rows) uses the index, a ~10% one (~20k rows) does not.
+statement ok
+CREATE TABLE t4 AS SELECT point::GEOMETRY AS geom
+FROM st_generatepoints({min_x: 0, min_y: 0, max_x: 1000, max_y: 1000}::BOX_2D, 200_000, 4);
+
+statement ok
+CREATE INDEX t4_idx ON t4 USING RTREE (geom);
+
+query II
+EXPLAIN SELECT count(*) FROM t4 WHERE ST_Within(geom, ST_MakeEnvelope(100, 100, 323.6, 323.6));
+----
+physical_plan	<REGEX>:.*RTREE_INDEX_SCAN.*
+
+query II
+EXPLAIN SELECT count(*) FROM t4 WHERE ST_Within(geom, ST_MakeEnvelope(100, 100, 416.2, 416.2));
+----
+physical_plan	<!REGEX>:.*RTREE_INDEX_SCAN.*
+
+# The settings can force the decision either way
+statement ok
+SET rtree_index_scan_ratio = 1.0;
+
+query II
+EXPLAIN SELECT count(*) FROM t1 WHERE ST_Within(geom, ST_MakeEnvelope(100, 100, 700, 700));
+----
+physical_plan	<REGEX>:.*RTREE_INDEX_SCAN.*
+
+statement ok
+SET rtree_index_scan_ratio = 0.0;
+
+statement ok
+SET rtree_index_scan_min_rows = 0;
+
+query II
+EXPLAIN SELECT count(*) FROM t1 WHERE ST_Within(geom, ST_MakeEnvelope(500, 500, 510, 510));
+----
+physical_plan	<!REGEX>:.*RTREE_INDEX_SCAN.*

@@ -1,25 +1,31 @@
+# name: test/sql/gdal/gdal_filter_pushdown.test
+# group: [gdal]
+
 require spatial
+
+statement ok
+SET profiling_renderer_settings = MAP {'operator_casing': 'upper'};
 
 statement ok
 COPY (
 	SELECT row_number() OVER () as id, point::GEOMETRY
 	FROM st_generatepoints({min_x: 0, min_y: 0, max_x: 100, max_y: 100}::BOX_2D, 10_000, 1337)
-) TO '__TEST_DIR__/pts.fgb' WITH (FORMAT GDAL, DRIVER 'FlatGeoBuf', CRS 'EPSG:4326');
+) TO '{TEST_DIR}/pts.fgb' WITH (FORMAT GDAL, DRIVER 'FlatGeoBuf', CRS 'EPSG:4326');
 
 
 # Test that we can push down the filter to GDAL
 query II
-EXPLAIN SELECT count(*) FROM st_read('__TEST_DIR__/pts.fgb') WHERE geom && ST_MakeEnvelope(45, 45, 65, 65);
+EXPLAIN SELECT count(*) FROM st_read('{TEST_DIR}/pts.fgb') WHERE geom && ST_MakeEnvelope(45, 45, 65, 65);
 ----
 physical_plan	<REGEX>:.*MinX, MinY.*
 
 query II
-EXPLAIN SELECT count(*) FROM st_read('__TEST_DIR__/pts.fgb') WHERE st_intersects_extent(geom, ST_MakeEnvelope(45, 45, 65, 65));
+EXPLAIN SELECT count(*) FROM st_read('{TEST_DIR}/pts.fgb') WHERE st_intersects_extent(geom, ST_MakeEnvelope(45, 45, 65, 65));
 ----
 physical_plan	<REGEX>:.*MinX, MinY.*
 
 # For exact predicates, we push down the bbox, but the exact predicate is still evaluated in DuckDB
 query II
-EXPLAIN SELECT count(*) FROM st_read('__TEST_DIR__/pts.fgb') WHERE st_intersects(geom, ST_MakeEnvelope(45, 45, 65, 65));
+EXPLAIN SELECT count(*) FROM st_read('{TEST_DIR}/pts.fgb') WHERE st_intersects(geom, ST_MakeEnvelope(45, 45, 65, 65));
 ----
 physical_plan	<REGEX>:.*ST_Intersects.*MinX, MinY.*

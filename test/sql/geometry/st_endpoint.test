@@ -1,20 +1,23 @@
+# name: test/sql/geometry/st_endpoint.test
+# group: [geometry]
+
 require spatial
 
 # GEOMETRY tests
 foreach TYPE GEOMETRY LINESTRING_2D
 
 query I
-SELECT st_astext(st_endpoint(ST_GeomFromText('LINESTRING(0 0, 1 1, 2 2, 3 3)')::${TYPE}));
+SELECT st_astext(st_endpoint(ST_GeomFromText('LINESTRING(0 0, 1 1, 2 2, 3 3)')::{TYPE}));
 ----
 POINT (3 3)
 
 query I
-SELECT st_astext(st_endpoint(ST_GeomFromText('LINESTRING(4 4, 1 1)')::${TYPE}));
+SELECT st_astext(st_endpoint(ST_GeomFromText('LINESTRING(4 4, 1 1)')::{TYPE}));
 ----
 POINT (1 1)
 
 query I
-SELECT st_astext(st_endpoint(ST_GeomFromText('LINESTRING EMPTY')::${TYPE}));
+SELECT st_astext(st_endpoint(ST_GeomFromText('LINESTRING EMPTY')::{TYPE}));
 ----
 NULL
 

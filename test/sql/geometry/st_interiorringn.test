@@ -1,3 +1,6 @@
+# name: test/sql/geometry/st_interiorringn.test
+# group: [geometry]
+
 require spatial
 
 foreach TYPE GEOMETRY POLYGON_2D
@@ -6,7 +9,7 @@ query I
 select st_interiorringn(
     st_geomfromtext('POLYGON((0 0,10 0,10 10,0 10,0 0),
                              (2 2,4 2,4 4,2 4,2 2),
-                             (6 6,8 6,8 8,6 8,6 6))')::${TYPE},
+                             (6 6,8 6,8 8,6 8,6 6))')::{TYPE},
     2
 );
 ----
@@ -16,7 +19,7 @@ query I
 select st_interiorringn(
     st_geomfromtext('POLYGON((0 0,10 0,10 10,0 10,0 0),
                              (2 2,4 2,4 4,2 4,2 2),
-                             (6 6,8 6,8 8,6 8,6 6))')::${TYPE},
+                             (6 6,8 6,8 8,6 8,6 6))')::{TYPE},
     3
 );
 ----
@@ -24,7 +27,7 @@ NULL
 
 query I
 select st_interiorringn(
-    st_geomfromtext('POLYGON EMPTY')::${TYPE},
+    st_geomfromtext('POLYGON EMPTY')::{TYPE},
     3
 );
 ----
@@ -32,7 +35,7 @@ NULL
 
 query I
 select st_interiorringn(
-    st_geomfromtext('POLYGON EMPTY')::${TYPE},
+    st_geomfromtext('POLYGON EMPTY')::{TYPE},
     0
 );
 ----

@@ -14,10 +14,10 @@ COPY (
 		SELECT
 			st_geomfromtext('LINESTRING(0 0, 100 100, 200 0)') as geom
 	)
-) TO '__TEST_DIR__/test_linestring.mvt' (FORMAT BLOB);
+) TO '{TEST_DIR}/test_linestring.mvt' (FORMAT BLOB);
 
 query I
-select count(*) from st_read('__TEST_DIR__/test_linestring.mvt');
+select count(*) from st_read('{TEST_DIR}/test_linestring.mvt');
 ----
 1
 
@@ -32,10 +32,10 @@ COPY (
 		SELECT
 			st_geomfromtext('MULTILINESTRING((0 0, 100 100, 200 0), (300 0, 400 100, 500 0))') as geom
 	)
-) TO '__TEST_DIR__/test_multilinestring.mvt' (FORMAT BLOB);
+) TO '{TEST_DIR}/test_multilinestring.mvt' (FORMAT BLOB);
 
 query I
-select count(*) from st_read('__TEST_DIR__/test_multilinestring.mvt');
+select count(*) from st_read('{TEST_DIR}/test_multilinestring.mvt');
 ----
 1
 
@@ -56,10 +56,10 @@ COPY (
 		SELECT
 			st_geomfromtext('LINESTRING(100 100, 500 500, 900 100)') as geom
 	)
-) TO '__TEST_DIR__/test_clipped_linestring.mvt' (FORMAT BLOB);
+) TO '{TEST_DIR}/test_clipped_linestring.mvt' (FORMAT BLOB);
 
 query I
-select count(*) from st_read('__TEST_DIR__/test_clipped_linestring.mvt');
+select count(*) from st_read('{TEST_DIR}/test_clipped_linestring.mvt');
 ----
 1
 
@@ -80,10 +80,10 @@ COPY (
 		SELECT
 			st_geomfromtext('LINESTRING(-500 500, 500 500, 1500 500)') as geom
 	)
-) TO '__TEST_DIR__/test_crossing_linestring.mvt' (FORMAT BLOB);
+) TO '{TEST_DIR}/test_crossing_linestring.mvt' (FORMAT BLOB);
 
 query I
-select count(*) from st_read('__TEST_DIR__/test_crossing_linestring.mvt');
+select count(*) from st_read('{TEST_DIR}/test_crossing_linestring.mvt');
 ----
 1
 
@@ -104,10 +104,10 @@ COPY (
 		FROM range(0, 10) as r(x),
 			 range(0, 10) as rr(y)
 	)
-) TO '__TEST_DIR__/test_various_linestrings.mvt' (FORMAT BLOB);
+) TO '{TEST_DIR}/test_various_linestrings.mvt' (FORMAT BLOB);
 
 query I
-select count(*) from st_read('__TEST_DIR__/test_various_linestrings.mvt');
+select count(*) from st_read('{TEST_DIR}/test_various_linestrings.mvt');
 ----
 100
 
@@ -129,10 +129,10 @@ COPY (
 		SELECT
 			st_geomfromtext('LINESTRING(-10000000 5000000, 0 0, 10000000 -5000000)') as geom
 	)
-) TO '__TEST_DIR__/test_global_linestring.mvt' (FORMAT BLOB);
+) TO '{TEST_DIR}/test_global_linestring.mvt' (FORMAT BLOB);
 
 query I
-select count(*) from st_read('__TEST_DIR__/test_global_linestring.mvt');
+select count(*) from st_read('{TEST_DIR}/test_global_linestring.mvt');
 ----
 1
 
@@ -148,10 +148,10 @@ COPY (
 			(st_geomfromtext('MULTILINESTRING((100 100, 500 500), (600 600, 900 900))'), 'road1'),
 			(st_geomfromtext('LINESTRING(200 200, 800 800)'), 'road2')
 	) t(geom, name)
-) TO '__TEST_DIR__/test_roads.mvt' (FORMAT BLOB);
+) TO '{TEST_DIR}/test_roads.mvt' (FORMAT BLOB);
 
 query II
-select count(*), count(name) from st_read('__TEST_DIR__/test_roads.mvt');
+select count(*), count(name) from st_read('{TEST_DIR}/test_roads.mvt');
 ----
 2	2
 

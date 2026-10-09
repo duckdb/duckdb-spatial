@@ -13,11 +13,12 @@ class ScalarFunction;
 class AggregateFunction;
 class ClientContext;
 class Expression;
+class BindScalarFunctionInput;
+class BindAggregateFunctionInput;
+class ResolveScalarFunctionTypesInput;
 
-typedef unique_ptr<FunctionData> (*bind_scalar_function_t)(ClientContext &context, ScalarFunction &bound_function,
-                                                           vector<unique_ptr<Expression>> &arguments);
-typedef unique_ptr<FunctionData> (*bind_aggregate_function_t)(ClientContext &context, AggregateFunction &function,
-                                                              vector<unique_ptr<Expression>> &arguments);
+typedef unique_ptr<FunctionData> (*bind_scalar_function_t)(BindScalarFunctionInput &input);
+typedef unique_ptr<FunctionData> (*bind_aggregate_function_t)(BindAggregateFunctionInput &input);
 
 struct GeoTypes {
 	static LogicalType POINT_2D();
@@ -34,25 +35,16 @@ struct GeoTypes {
 
 	static LogicalType CreateEnumType(const string &name, const vector<string> &members);
 
-	static unique_ptr<FunctionData> PropagateCRS(ClientContext &context, ScalarFunction &bound_function,
-	                                             vector<unique_ptr<Expression>> &arguments);
-
-	static unique_ptr<FunctionData> PropagateCRS(ClientContext &context, AggregateFunction &bound_function,
-	                                             vector<unique_ptr<Expression>> &arguments);
+	//! Verifies that the geometry arguments share the same CRS, and propagates it to the return type
+	static void PropagateCRS(ResolveScalarFunctionTypesInput &input);
+	static unique_ptr<FunctionData> PropagateCRS(BindAggregateFunctionInput &input);
 
 	template <bind_aggregate_function_t BIND>
-	static unique_ptr<FunctionData> PropagateCRS(ClientContext &context, AggregateFunction &bound_function,
-	                                             vector<unique_ptr<Expression>> &arguments) {
-		PropagateCRS(context, bound_function, arguments);
-		return BIND(context, bound_function, arguments);
+	static unique_ptr<FunctionData> PropagateCRS(BindAggregateFunctionInput &input) {
+		PropagateCRS(input);
+		return BIND(input);
 	}
 
-	template <bind_scalar_function_t BIND>
-	static unique_ptr<FunctionData> PropagateCRS(ClientContext &context, ScalarFunction &bound_function,
-	                                             vector<unique_ptr<Expression>> &arguments) {
-		PropagateCRS(context, bound_function, arguments);
-		return BIND(context, bound_function, arguments);
-	}
 };
 
 } // namespace duckdb

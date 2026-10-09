@@ -1,5 +1,6 @@
 #include "spatial/util/function_builder.hpp"
 
+#include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/function_entry.hpp"
 #include "duckdb/catalog/catalog_entry/table_function_catalog_entry.hpp"
 
@@ -64,8 +65,8 @@ void FunctionBuilder::Register(ExtensionLoader &loader, const char *name, Scalar
 	// Also add the parameter names. We need to access the catalog entry for this.
 	auto &catalog = Catalog::GetSystemCatalog(db);
 	auto transaction = CatalogTransaction::GetSystemTransaction(db);
-	auto &schema = catalog.GetSchema(transaction, DEFAULT_SCHEMA);
-	auto catalog_entry = schema.GetEntry(transaction, CatalogType::SCALAR_FUNCTION_ENTRY, name);
+	auto &schema = catalog.GetSchema(transaction, Identifier::DefaultSchema());
+	auto catalog_entry = schema.GetEntry(transaction, CatalogType::SCALAR_FUNCTION_ENTRY, Identifier(name));
 	if (!catalog_entry) {
 		// This should not happen, we just registered the function
 		throw InternalException("Function with name \"%s\" not found in FunctionBuilder::AddScalar", name);
@@ -108,8 +109,8 @@ void FunctionBuilder::Register(ExtensionLoader &loader, const char *name, Aggreg
 	// Also add the parameter names. We need to access the catalog entry for this.
 	auto &catalog = Catalog::GetSystemCatalog(db);
 	auto transaction = CatalogTransaction::GetSystemTransaction(db);
-	auto &schema = catalog.GetSchema(transaction, DEFAULT_SCHEMA);
-	auto catalog_entry = schema.GetEntry(transaction, CatalogType::AGGREGATE_FUNCTION_ENTRY, name);
+	auto &schema = catalog.GetSchema(transaction, Identifier::DefaultSchema());
+	auto catalog_entry = schema.GetEntry(transaction, CatalogType::AGGREGATE_FUNCTION_ENTRY, Identifier(name));
 	if (!catalog_entry) {
 		// This should not happen, we just registered the function
 		throw InternalException("Function with name \"%s\" not found in FunctionBuilder::AddAggregate", name);
@@ -131,25 +132,34 @@ void FunctionBuilder::Register(ExtensionLoader &loader, const char *name, Aggreg
 }
 
 void FunctionBuilder::Register(ExtensionLoader &loader, const char *name, MacroFunctionBuilder &builder) {
-	// Register the function
-	vector<DefaultMacro> macros;
 	vector<FunctionDescription> descriptions;
+	unique_ptr<CreateMacroInfo> combined_info;
 
 	for (auto &def : builder.macros) {
+		// Build macro_definition string: "(param1, param2) AS body"
+		string macro_def = "(";
+		for (idx_t i = 0; i < def.parameters.size(); i++) {
+			if (i > 0) {
+				macro_def += ", ";
+			}
+			macro_def += def.parameters[i];
+		}
+		macro_def += ") AS ";
+		macro_def += def.body;
+
 		DefaultMacro macro = {};
 		macro.schema = DEFAULT_SCHEMA;
 		macro.name = name;
-		macro.named_parameters[0].name = nullptr;
-		macro.named_parameters[0].default_value = nullptr;
-		macro.macro = def.body.c_str();
-		for (idx_t i = 0; i < def.parameters.size(); i++) {
-			if (i >= 8) {
-				throw InternalException("Too many parameters in macro!");
+		macro.macro_definition = macro_def.c_str();
+
+		auto info = DefaultFunctionGenerator::CreateInternalMacroInfo(macro);
+		if (!combined_info) {
+			combined_info = std::move(info);
+		} else {
+			for (auto &m : info->macros) {
+				combined_info->macros.push_back(std::move(m));
 			}
-			macro.parameters[i] = def.parameters[i].c_str();
 		}
-		macro.parameters[def.parameters.size()] = nullptr;
-		macros.push_back(macro);
 
 		FunctionDescription function_description;
 		if (def.description) {
@@ -161,11 +171,10 @@ void FunctionBuilder::Register(ExtensionLoader &loader, const char *name, MacroF
 		descriptions.push_back(function_description);
 	}
 
-	const auto macro_ptr = array_ptr<const DefaultMacro>(macros.data(), macros.size());
-	const auto info = DefaultFunctionGenerator::CreateInternalMacroInfo(macro_ptr);
-	info->descriptions = descriptions;
-
-	loader.RegisterFunction(*info);
+	if (combined_info) {
+		combined_info->descriptions = descriptions;
+		loader.RegisterFunction(*combined_info);
+	}
 }
 
 void FunctionBuilder::AddTableFunctionDocs(ExtensionLoader &loader, const char *name, const char *desc,
@@ -174,8 +183,8 @@ void FunctionBuilder::AddTableFunctionDocs(ExtensionLoader &loader, const char *
 	auto &db = loader.GetDatabaseInstance();
 	auto &catalog = Catalog::GetSystemCatalog(db);
 	auto transaction = CatalogTransaction::GetSystemTransaction(db);
-	auto &schema = catalog.GetSchema(transaction, DEFAULT_SCHEMA);
-	auto catalog_entry = schema.GetEntry(transaction, CatalogType::TABLE_FUNCTION_ENTRY, name);
+	auto &schema = catalog.GetSchema(transaction, Identifier::DefaultSchema());
+	auto catalog_entry = schema.GetEntry(transaction, CatalogType::TABLE_FUNCTION_ENTRY, Identifier(name));
 	if (!catalog_entry) {
 		// This should not happen, we just registered the function
 		throw InternalException("Function with name \"%s\" not found in FunctionBuilder::AddScalar", name);

@@ -1,3 +1,5 @@
+# name: test/sql/export_import_csv.test
+# group: [sql]
 
 require spatial
 
@@ -25,7 +27,7 @@ INSERT INTO tbl1 VALUES
 
 # Now import and export
 statement ok
-EXPORT DATABASE '__TEST_DIR__/test_export_import_csv';
+EXPORT DATABASE '{TEST_DIR}/test_export_import_csv';
 
 statement ok
 DROP TABLE tbl1;
@@ -39,7 +41,7 @@ does not exist
 # TODO: Somehow this broke in 0.9.2 without us noticing
 
 #statement ok
-#import database '__TEST_DIR__/test_export_import_csv';
+#import database '{TEST_DIR}/test_export_import_csv';
 #
 #query I
 #SELECT ST_AsText(geom) FROM tbl1;

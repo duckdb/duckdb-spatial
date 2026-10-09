@@ -4,7 +4,7 @@
 require spatial
 
 statement ok
-PRAGMA enable_verification;
+SET profiling_renderer_settings = MAP {'operator_casing': 'upper'};
 
 statement ok
 CREATE TABLE t1 (id INT, g1 GEOMETRY, g2 GEOMETRY);

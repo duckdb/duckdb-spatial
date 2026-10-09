@@ -1,9 +1,12 @@
+# name: test/sql/index/rtree_filter_pullup.test
+# group: [index]
+
 require spatial
 
 require parquet
 
 query I rowsort
-SELECT id FROM '__WORKING_DIRECTORY__/test/data/segments.parquet'
+SELECT id FROM '{WORKING_DIRECTORY}/test/data/segments.parquet'
 WHERE subtype='road' AND ST_Intersects(geometry, ST_Buffer(ST_GeomFromText('POINT (-8476562 4795814)'), 100));
 ----
 0862aac667ffffff043df7e4c6756d14
@@ -12,7 +15,7 @@ WHERE subtype='road' AND ST_Intersects(geometry, ST_Buffer(ST_GeomFromText('POIN
 
 
 query III rowsort
-SELECT id, subtype, class FROM '__WORKING_DIRECTORY__/test/data/segments.parquet'
+SELECT id, subtype, class FROM '{WORKING_DIRECTORY}/test/data/segments.parquet'
 WHERE subtype='road' AND class='residential' AND ST_Intersects(geometry, ST_Buffer(ST_GeomFromText('POINT (-8476562 4795814)'), 100));
 ----
 0862aac667ffffff047de7f2111f86ad	road	residential

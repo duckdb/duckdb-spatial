@@ -1,0 +1,17 @@
+require spatial
+
+# Create a GeoPackage with three features
+statement ok
+COPY (
+    SELECT id, ST_GeomFromText('POINT (' || id || ' ' || id || ')') AS geom
+    FROM (VALUES (1), (2), (3)) AS t(id)
+) TO '{TEST_DIR}/test_fid.gpkg'
+WITH (FORMAT GDAL, DRIVER 'GPKG');
+
+# Read it back and verify the fid column is present with correct values
+query II
+SELECT fid, id FROM st_read('{TEST_DIR}/test_fid.gpkg') ORDER BY fid;
+----
+1	1
+2	2
+3	3

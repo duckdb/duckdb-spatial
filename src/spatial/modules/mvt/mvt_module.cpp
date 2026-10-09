@@ -4,6 +4,8 @@
 
 #include "duckdb/common/types/hash.hpp"
 #include "duckdb/common/vector_operations/generic_executor.hpp"
+#include "duckdb/execution/expression_executor.hpp"
+#include "duckdb/function/aggregate_function.hpp"
 #include "spatial/geometry/geometry_serialization.hpp"
 #include "spatial/geometry/sgl.hpp"
 #include "spatial/spatial_types.hpp"
@@ -73,7 +75,7 @@ struct ST_TileEnvelope {
 		auto &lstate = LocalState::ResetAndGet(state);
 
 		TernaryExecutor::Execute<int32_t, int32_t, int32_t, string_t>(
-		    args.data[0], args.data[1], args.data[2], result, args.size(),
+		    args.data[0], args.data[1], args.data[2], result,
 		    [&](int32_t tile_zoom, int32_t tile_x, int32_t tile_y) {
 			    validate_tile_zoom_argument(tile_zoom);
 			    uint32_t zoom_extent = 1u << tile_zoom;
@@ -823,21 +825,19 @@ struct ST_AsMVT {
 		}
 	};
 
-	static unique_ptr<FunctionData> Bind(ClientContext &context, AggregateFunction &function,
-	                                     vector<unique_ptr<Expression>> &arguments) {
+	static unique_ptr<FunctionData> Bind(BindAggregateFunctionInput &input) {
+		auto &context = input.GetClientContext();
+		auto &arguments = input.GetArguments();
+
 		auto result = make_uniq<BindData>();
 
 		// Figure part of the row is the geometry column
-		const auto &row_type = arguments[0]->return_type;
+		const auto &row_type = arguments[0]->GetReturnType();
 		if (row_type.id() != LogicalTypeId::STRUCT) {
 			throw InvalidInputException("ST_AsMVT: first argument must be a STRUCT (i.e. a row type)");
 		}
 
 		// Fold all the other parameters
-		auto folded_layer = false;
-		auto folded_extent = false;
-		auto folded_geom = false;
-		auto folded_feature = false;
 
 		if (arguments.size() >= 2) {
 			auto &layer_expr = arguments[1];
@@ -849,7 +849,6 @@ struct ST_AsMVT {
 						throw InvalidInputException("ST_AsMVT: layer name cannot be empty");
 					}
 				}
-				folded_layer = true;
 			} else {
 				throw InvalidInputException("ST_AsMVT: layer name must be a constant string");
 			}
@@ -866,7 +865,6 @@ struct ST_AsMVT {
 				if (result->extent == 0) {
 					throw InvalidInputException("ST_AsMVT: extent must be greater than zero");
 				}
-				folded_extent = true;
 			} else {
 				throw InvalidInputException("ST_AsMVT: extent must be a constant integer");
 			}
@@ -882,7 +880,6 @@ struct ST_AsMVT {
 						throw InvalidInputException("ST_AsMVT: geometry column name cannot be empty");
 					}
 				}
-				folded_geom = true;
 			} else {
 				throw InvalidInputException("ST_AsMVT: geometry column name must be a constant string");
 			}
@@ -899,7 +896,6 @@ struct ST_AsMVT {
 						throw InvalidInputException("ST_AsMVT: feature id column name cannot be empty");
 					}
 				}
-				folded_feature = true;
 			} else {
 				throw InvalidInputException("ST_AsMVT: feature id column name must be a constant string");
 			}
@@ -976,23 +972,11 @@ struct ST_AsMVT {
 					                            "DOUBLE, INTEGER, BIGINT, BOOLEAN",
 					                            name.c_str(), type_name.c_str());
 				}
-				result->tag_names.push_back(name);
+				result->tag_names.emplace_back(name);
 			}
 		}
 
-		// Erase arguments, back to front
-		if (folded_feature) {
-			Function::EraseArgument(function, arguments, 4);
-		}
-		if (folded_geom) {
-			Function::EraseArgument(function, arguments, 3);
-		}
-		if (folded_extent) {
-			Function::EraseArgument(function, arguments, 2);
-		}
-		if (folded_layer) {
-			Function::EraseArgument(function, arguments, 1);
-		}
+		// the folded arguments stay part of the expression tree - Update only reads the leading row argument
 
 		return std::move(result);
 	}
@@ -1004,12 +988,14 @@ struct ST_AsMVT {
 		MVTLayer layer;
 	};
 
-	static idx_t StateSize(const AggregateFunction &) {
+	static idx_t StateSize(AggregateStateInput &) {
 		return sizeof(State);
 	}
 
-	static void Initialize(const AggregateFunction &, data_ptr_t state_mem) {
-		new (state_mem) State();
+	static void Initialize(AggregateStateInput &, data_ptr_t *states, idx_t count) {
+		for (idx_t i = 0; i < count; i++) {
+			new (states[i]) State();
+		}
 	}
 
 	//------------------------------------------------------------------------------------------------------------------
@@ -1017,7 +1003,7 @@ struct ST_AsMVT {
 	//------------------------------------------------------------------------------------------------------------------
 	static void Update(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &state_vec, idx_t count) {
 		const auto &bdata = aggr.bind_data->Cast<BindData>();
-		const auto &row_cols = StructVector::GetEntries(inputs[0]);
+		auto &row_cols = StructVector::GetEntries(inputs[0]);
 
 		UnifiedVectorFormat state_format;
 		UnifiedVectorFormat geom_format;
@@ -1027,18 +1013,18 @@ struct ST_AsMVT {
 		vector<UnifiedVectorFormat> property_formats;
 		vector<LogicalType> property_types;
 
-		state_vec.ToUnifiedFormat(count, state_format);
+		state_vec.ToUnifiedFormat(state_format);
 
 		for (idx_t col_idx = 0; col_idx < row_cols.size(); col_idx++) {
 			if (col_idx == bdata.geometry_column_idx) {
-				row_cols[col_idx]->ToUnifiedFormat(count, geom_format);
+				row_cols[col_idx].ToUnifiedFormat(geom_format);
 			} else if (bdata.feature_id_column_idx.IsValid() && col_idx == bdata.feature_id_column_idx.GetIndex()) {
-				row_cols[col_idx]->ToUnifiedFormat(count, fid_format);
-				fid_type = row_cols[col_idx]->GetType();
+				row_cols[col_idx].ToUnifiedFormat(fid_format);
+				fid_type = row_cols[col_idx].GetType();
 			} else {
 				property_formats.emplace_back();
-				row_cols[col_idx]->ToUnifiedFormat(count, property_formats.back());
-				property_types.push_back(row_cols[col_idx]->GetType());
+				row_cols[col_idx].ToUnifiedFormat(property_formats.back());
+				property_types.push_back(row_cols[col_idx].GetType());
 			}
 		}
 
@@ -1150,10 +1136,10 @@ struct ST_AsMVT {
 	//------------------------------------------------------------------------------------------------------------------
 	static void Combine(Vector &source_vec, Vector &target_vec, AggregateInputData &aggr, idx_t count) {
 		UnifiedVectorFormat source_format;
-		source_vec.ToUnifiedFormat(count, source_format);
+		source_vec.ToUnifiedFormat(source_format);
 
 		const auto source_ptr = UnifiedVectorFormat::GetData<State *>(source_format);
-		const auto target_ptr = FlatVector::GetData<State *>(target_vec);
+		const auto target_ptr = FlatVector::GetDataMutable<State *>(target_vec);
 
 		for (idx_t row_idx = 0; row_idx < count; row_idx++) {
 			auto &source = *source_ptr[source_format.sel->get_index(row_idx)];
@@ -1172,11 +1158,11 @@ struct ST_AsMVT {
 	//------------------------------------------------------------------------------------------------------------------
 	// Finalize
 	//------------------------------------------------------------------------------------------------------------------
-	static void Finalize(Vector &state_vec, AggregateInputData &aggr, Vector &result, idx_t count, idx_t offset) {
+	static void Finalize(Vector &state_vec, AggregateFinalizeInputData &aggr, Vector &result, idx_t count, idx_t offset) {
 		const auto &bdata = aggr.bind_data->Cast<BindData>();
 
 		UnifiedVectorFormat state_format;
-		state_vec.ToUnifiedFormat(count, state_format);
+		state_vec.ToUnifiedFormat(state_format);
 		const auto state_ptr = UnifiedVectorFormat::GetData<State *>(state_format);
 
 		vector<char> buffer;
@@ -1192,7 +1178,7 @@ struct ST_AsMVT {
 			state.layer.Finalize(bdata.extent, bdata.tag_names, bdata.layer_name, buffer, tag_dict);
 
 			// Now we have the layer buffer, we can write it to the result vector
-			const auto result_data = FlatVector::GetData<string_t>(result);
+			const auto result_data = FlatVector::GetDataMutable<string_t>(result);
 			result_data[out_idx] = StringVector::AddStringOrBlob(result, buffer.data(), buffer.size());
 		}
 	}
@@ -1261,7 +1247,7 @@ struct ST_AsMVT {
 			func.SetFunction(agg);
 			for (auto &arg_type : optional_args) {
 				// Register all the variants with optional arguments
-				agg.arguments.push_back(arg_type);
+				agg.GetSignature().AddParameter(arg_type);
 				func.SetFunction(agg);
 			}
 

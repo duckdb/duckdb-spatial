@@ -1,9 +1,9 @@
+# name: test/sql/index/rtree_block_reclaim.test_slow
+# group: [index]
+
 require spatial
 
-load __TEST_DIR__/rtree_reclaim_space.db
-
-statement ok
-PRAGMA enable_verification;
+load {TEST_DIR}/rtree_reclaim_space.db
 
 statement ok
 CREATE TABLE tbl AS SELECT row_number() over () as i, geom::GEOMETRY as geom FROM st_generatepoints({min_x: 0, min_y: 0, max_x: 10000, max_y: 10000}::BOX_2D, 100_000, 1337) as pts(geom);

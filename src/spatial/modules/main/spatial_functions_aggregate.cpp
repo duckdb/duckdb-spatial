@@ -143,7 +143,7 @@ void RegisterSpatialAggregateFunctions(ExtensionLoader &loader) {
 	auto agg = AggregateFunction::UnaryAggregate<ExtentAggState, string_t, string_t, ExtentAggFunction>(
 	    LogicalType::GEOMETRY(), LogicalType::GEOMETRY());
 
-	agg.bind = GeoTypes::PropagateCRS;
+	agg.SetBindCallback(GeoTypes::PropagateCRS);
 
 	FunctionBuilder::RegisterAggregate(loader, "ST_Extent_Agg", [&](AggregateFunctionBuilder &func) {
 		func.SetFunction(agg);

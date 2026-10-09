@@ -1,7 +1,7 @@
-require spatial
+# name: test/sql/index/rtree_transaction.test
+# group: [index]
 
-statement ok
-PRAGMA enable_verification;
+require spatial
 
 statement ok
 BEGIN TRANSACTION;

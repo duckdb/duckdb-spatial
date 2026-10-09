@@ -2,6 +2,8 @@
 
 #include "duckdb/planner/operator/logical_extension_operator.hpp"
 
+#include "spatial/operators/spatial_join_physical.hpp"
+
 namespace duckdb {
 
 class LogicalSpatialJoin final : public LogicalExtensionOperator {
@@ -13,7 +15,7 @@ public:
 	//! The type of the join (INNER, OUTER, etc...)
 	JoinType join_type;
 	//! Table index used to refer to the MARK column (in case of a MARK join)
-	idx_t mark_index {};
+	TableIndex mark_index {};
 
 	//! The spatial predicate of the join
 	unique_ptr<Expression> spatial_predicate;
@@ -22,14 +24,18 @@ public:
 	vector<unique_ptr<Expression>> extra_conditions;
 
 	//! The columns of the LHS that are output by the join
-	vector<idx_t> left_projection_map;
+	vector<ProjectionIndex> left_projection_map;
 	//! The columns of the RHS that are output by the join
-	vector<idx_t> right_projection_map;
+	vector<ProjectionIndex> right_projection_map;
 	//! Join Keys statistics (optional)
 	vector<unique_ptr<BaseStatistics>> join_stats;
 
 	bool has_const_distance = false;
 	double const_distance = 0.0;
+
+	//! Probe-side targets into which we push a bounding-box filter derived from the build-side R-tree.
+	//! Populated by the optimizer; not serialized (holds runtime shared_ptrs).
+	vector<SpatialJoinPushdownTarget> filter_pushdown_targets;
 
 public:
 	explicit LogicalSpatialJoin(JoinType join_type_p);

@@ -7,86 +7,73 @@
 namespace duckdb {
 
 LogicalType GeoTypes::POINT_2D() {
-	auto type = LogicalType::STRUCT({{"x", LogicalType::DOUBLE}, {"y", LogicalType::DOUBLE}});
-	type.SetAlias("POINT_2D");
-	return type;
+	return LogicalType::STRUCT({{"x", LogicalType::DOUBLE}, {"y", LogicalType::DOUBLE}}).WithAlias("POINT_2D");
 }
 
 LogicalType GeoTypes::POINT_3D() {
-	auto type =
-	    LogicalType::STRUCT({{"x", LogicalType::DOUBLE}, {"y", LogicalType::DOUBLE}, {"z", LogicalType::DOUBLE}});
-	type.SetAlias("POINT_3D");
-	return type;
+	return LogicalType::STRUCT({{"x", LogicalType::DOUBLE}, {"y", LogicalType::DOUBLE}, {"z", LogicalType::DOUBLE}})
+	    .WithAlias("POINT_3D");
 }
 
 LogicalType GeoTypes::POINT_4D() {
-	auto type = LogicalType::STRUCT({{"x", LogicalType::DOUBLE},
-	                                 {"y", LogicalType::DOUBLE},
-	                                 {"z", LogicalType::DOUBLE},
-	                                 {"m", LogicalType::DOUBLE}});
-	type.SetAlias("POINT_4D");
-	return type;
+	return LogicalType::STRUCT({{"x", LogicalType::DOUBLE},
+	                            {"y", LogicalType::DOUBLE},
+	                            {"z", LogicalType::DOUBLE},
+	                            {"m", LogicalType::DOUBLE}})
+	    .WithAlias("POINT_4D");
 }
 
 LogicalType GeoTypes::BOX_2D() {
-	auto type = LogicalType::STRUCT({{"min_x", LogicalType::DOUBLE},
-	                                 {"min_y", LogicalType::DOUBLE},
-	                                 {"max_x", LogicalType::DOUBLE},
-	                                 {"max_y", LogicalType::DOUBLE}});
-	type.SetAlias("BOX_2D");
-	return type;
+	return LogicalType::STRUCT({{"min_x", LogicalType::DOUBLE},
+	                            {"min_y", LogicalType::DOUBLE},
+	                            {"max_x", LogicalType::DOUBLE},
+	                            {"max_y", LogicalType::DOUBLE}})
+	    .WithAlias("BOX_2D");
 }
 
 LogicalType GeoTypes::BOX_2DF() {
-	auto type = LogicalType::STRUCT({{"min_x", LogicalType::FLOAT},
-	                                 {"min_y", LogicalType::FLOAT},
-	                                 {"max_x", LogicalType::FLOAT},
-	                                 {"max_y", LogicalType::FLOAT}});
-	type.SetAlias("BOX_2DF");
-	return type;
+	return LogicalType::STRUCT({{"min_x", LogicalType::FLOAT},
+	                            {"min_y", LogicalType::FLOAT},
+	                            {"max_x", LogicalType::FLOAT},
+	                            {"max_y", LogicalType::FLOAT}})
+	    .WithAlias("BOX_2DF");
 }
 
 LogicalType GeoTypes::LINESTRING_2D() {
-	auto type = LogicalType::LIST(LogicalType::STRUCT({{"x", LogicalType::DOUBLE}, {"y", LogicalType::DOUBLE}}));
-	type.SetAlias("LINESTRING_2D");
-	return type;
+	return LogicalType::LIST(LogicalType::STRUCT({{"x", LogicalType::DOUBLE}, {"y", LogicalType::DOUBLE}}))
+	    .WithAlias("LINESTRING_2D");
 }
 
 LogicalType GeoTypes::LINESTRING_3D() {
-	auto type = LogicalType::LIST(
-	    LogicalType::STRUCT({{"x", LogicalType::DOUBLE}, {"y", LogicalType::DOUBLE}, {"z", LogicalType::DOUBLE}}));
-	type.SetAlias("LINESTRING_3D");
-	return type;
+	return LogicalType::LIST(LogicalType::STRUCT(
+	                             {{"x", LogicalType::DOUBLE}, {"y", LogicalType::DOUBLE}, {"z", LogicalType::DOUBLE}}))
+	    .WithAlias("LINESTRING_3D");
 }
 
 LogicalType GeoTypes::POLYGON_2D() {
-	auto type = LogicalType::LIST(
-	    LogicalType::LIST(LogicalType::STRUCT({{"x", LogicalType::DOUBLE}, {"y", LogicalType::DOUBLE}})));
-	type.SetAlias("POLYGON_2D");
-	return type;
+	return LogicalType::LIST(
+	           LogicalType::LIST(LogicalType::STRUCT({{"x", LogicalType::DOUBLE}, {"y", LogicalType::DOUBLE}})))
+	    .WithAlias("POLYGON_2D");
 }
 
 LogicalType GeoTypes::POLYGON_3D() {
-	auto type = LogicalType::LIST(LogicalType::LIST(
-	    LogicalType::STRUCT({{"x", LogicalType::DOUBLE}, {"y", LogicalType::DOUBLE}, {"z", LogicalType::DOUBLE}})));
-	type.SetAlias("POLYGON_3D");
-	return type;
+	return LogicalType::LIST(LogicalType::LIST(LogicalType::STRUCT(
+	                             {{"x", LogicalType::DOUBLE}, {"y", LogicalType::DOUBLE}, {"z", LogicalType::DOUBLE}})))
+	    .WithAlias("POLYGON_3D");
 }
 
 LogicalType GeoTypes::CreateEnumType(const string &name, const vector<string> &members) {
 	auto varchar_vector = Vector(LogicalType::VARCHAR, members.size());
-	auto varchar_data = FlatVector::GetData<string_t>(varchar_vector);
+	auto varchar_data = FlatVector::GetDataMutable<string_t>(varchar_vector);
 	for (idx_t i = 0; i < members.size(); i++) {
 		auto str = string_t(members[i]);
 		varchar_data[i] = str.IsInlined() ? str : StringVector::AddString(varchar_vector, str);
 	}
-	auto enum_type = LogicalType::ENUM(name, varchar_vector, members.size());
-	enum_type.SetAlias(name);
-	return enum_type;
+	return LogicalType::ENUM(name, varchar_vector, members.size()).WithAlias(name);
 }
 
-static unique_ptr<FunctionData> PropagateTypesInternal(ClientContext &context, BaseScalarFunction &bound_function,
-                                                       vector<unique_ptr<Expression>> &arguments) {
+static unique_ptr<FunctionData> PropagateTypesInternal(ClientContext &context, BoundSimpleFunction &bound_function,
+                                                       const vector<unique_ptr<Expression>> &arguments) {
 
 	CoordinateReferenceSystem crs;
 	auto found_crs = false;
@@ -96,7 +83,7 @@ static unique_ptr<FunctionData> PropagateTypesInternal(ClientContext &context, B
 
 		auto has_crs = false;
 
-		TypeVisitor::Contains(arg->return_type, [&](const LogicalType &type) {
+		TypeVisitor::Contains(arg->GetReturnType(), [&](const LogicalType &type) {
 			if (type.id() == LogicalTypeId::GEOMETRY && GeoType::HasCRS(type)) {
 				has_crs = true;
 				if (!found_crs) {
@@ -106,7 +93,7 @@ static unique_ptr<FunctionData> PropagateTypesInternal(ClientContext &context, B
 					auto &type_crs = GeoType::GetCRS(type);
 					if (!crs.Equals(type_crs)) {
 						throw BinderException(
-						    arg->query_location,
+						    arg->GetQueryLocation(),
 						    "Cannot call function '%s' with geometries of different coordinate reference systems "
 						    "(CRS).\n"
 						    "First geometry type is in '%s' which is not compatible with '%s'.\n"
@@ -115,7 +102,7 @@ static unique_ptr<FunctionData> PropagateTypesInternal(ClientContext &context, B
 						    " * Use 'ST_SetCRS' to explicitly override the CRS of a geometry expression, without "
 						    "performing a "
 						    "transformation.\n",
-						    bound_function.name, crs.GetIdentifier(), type_crs.GetIdentifier());
+						    bound_function.GetName(), crs.GetIdentifier(), type_crs.GetIdentifier());
 					}
 				}
 			}
@@ -124,31 +111,33 @@ static unique_ptr<FunctionData> PropagateTypesInternal(ClientContext &context, B
 
 		if (has_crs) {
 			// Override the type so that we set the CRS
-			bound_function.arguments[arg_idx] = arg->return_type;
+			bound_function.GetArguments()[arg_idx] = arg->GetReturnType();
 		}
 	}
 
-	const auto return_has_geom = TypeVisitor::Contains(bound_function.return_type, LogicalTypeId::GEOMETRY);
+	const auto return_has_geom = TypeVisitor::Contains(bound_function.GetReturnType(), LogicalTypeId::GEOMETRY);
 	if (found_crs && return_has_geom) {
 		// If the return type is geometry, we need to set the CRS on it as well
-		bound_function.return_type =
-		    TypeVisitor::VisitReplace(bound_function.return_type, [&](const LogicalType &type) {
+		bound_function.SetReturnType(
+		    TypeVisitor::VisitReplace(bound_function.GetReturnType(), [&](const LogicalType &type) {
 			    if (type.id() == LogicalTypeId::GEOMETRY) {
 				    return LogicalType::GEOMETRY(crs);
 			    }
 			    return type;
-		    });
+		    }));
 	}
 
 	return nullptr;
 }
-unique_ptr<FunctionData> GeoTypes::PropagateCRS(ClientContext &context, ScalarFunction &bound_function,
-                                                vector<unique_ptr<Expression>> &arguments) {
-	return PropagateTypesInternal(context, bound_function, arguments);
+void GeoTypes::PropagateCRS(ResolveScalarFunctionTypesInput &input) {
+	PropagateTypesInternal(input.GetClientContext(), input.GetBoundFunction(), input.GetArguments());
 }
 
-unique_ptr<FunctionData> GeoTypes::PropagateCRS(ClientContext &context, AggregateFunction &bound_function,
-                                                vector<unique_ptr<Expression>> &arguments) {
+unique_ptr<FunctionData> GeoTypes::PropagateCRS(BindAggregateFunctionInput &input) {
+	auto &context = input.GetClientContext();
+	auto &bound_function = input.GetBoundFunction();
+	auto &arguments = input.GetArguments();
+
 	return PropagateTypesInternal(context, bound_function, arguments);
 }
 

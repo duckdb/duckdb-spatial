@@ -1,0 +1,48 @@
+# name: test/sql/geometry/st_dwithin.test
+# description: Test ST_DWithin, including bind-data (constant distance) serialization round-trip
+# group: [geometry]
+
+require spatial
+
+# enable_verification round-trips the plan through serialization, which exercises the
+# ST_DWithin bind-data (constant distance) serialize/deserialize callbacks
+statement ok
+PRAGMA enable_verification
+
+# Constant distance (folded into bind data)
+query I
+SELECT ST_DWithin(ST_Point(0, 0), ST_Point(3, 4), 5.0);
+----
+true
+
+query I
+SELECT ST_DWithin(ST_Point(0, 0), ST_Point(3, 4), 4.0);
+----
+false
+
+# Exact boundary
+query I
+SELECT ST_DWithin(ST_Point(0, 0), ST_Point(3, 4), 5.0) AND NOT ST_DWithin(ST_Point(0, 0), ST_Point(3, 4), 4.999);
+----
+true
+
+# Constant distance over a table (the bind-data path that previously crashed under verification)
+statement ok
+CREATE TABLE pts AS SELECT ST_Point(x, 0) AS geom, x AS d FROM range(0, 10) t(x);
+
+query I
+SELECT count(*) FROM pts WHERE ST_DWithin(geom, ST_Point(0, 0), 3.0);
+----
+4
+
+# Non-constant distance (references a column -> no bind data, distance read at execution)
+query I
+SELECT count(*) FROM pts WHERE ST_DWithin(geom, ST_Point(0, 0), d::DOUBLE);
+----
+10
+
+# NULL handling
+query I
+SELECT ST_DWithin(NULL::GEOMETRY, ST_Point(0, 0), 5.0);
+----
+NULL

@@ -53,8 +53,10 @@ public:
 	void SetFunction(scalar_function_t fn);
 	void SetInit(init_local_state_t init);
 	void SetBind(bind_scalar_function_t bind);
+	void SetResolveTypes(resolve_scalar_types_t resolve_types);
 	void SetSerialize(function_serialize_t serialize);
 	void SetDeserialize(function_deserialize_t deserialize);
+	void SetFilterPrune(propagate_filter_t filter_prune);
 	void SetDescription(const string &desc);
 	void SetExample(const string &ex);
 	void CanThrowErrors();
@@ -68,31 +70,39 @@ private:
 };
 
 inline void ScalarFunctionVariantBuilder::AddParameter(const char *name, const LogicalType &type) {
-	function.arguments.emplace_back(type);
+	function.GetSignature().AddParameter(Identifier(name), type);
 	description.parameter_names.emplace_back(name);
 	description.parameter_types.emplace_back(type);
 }
 
 inline void ScalarFunctionVariantBuilder::SetReturnType(LogicalType type) {
-	function.return_type = std::move(type);
+	function.SetReturnType(std::move(type));
 }
 
 inline void ScalarFunctionVariantBuilder::SetFunction(scalar_function_t fn) {
-	function.function = fn;
+	function.SetFunctionCallback(fn);
 }
 
 inline void ScalarFunctionVariantBuilder::SetInit(init_local_state_t init) {
-	function.init_local_state = init;
+	function.SetInitStateCallback(init);
 }
 
 inline void ScalarFunctionVariantBuilder::SetBind(bind_scalar_function_t bind) {
-	function.bind = bind;
+	function.SetBindCallback(bind);
+}
+
+inline void ScalarFunctionVariantBuilder::SetResolveTypes(resolve_scalar_types_t resolve_types) {
+	function.SetResolveTypesCallback(resolve_types);
 }
 inline void ScalarFunctionVariantBuilder::SetSerialize(function_serialize_t serialize) {
-	function.serialize = serialize;
+	function.SetSerializeCallback(serialize);
 }
 inline void ScalarFunctionVariantBuilder::SetDeserialize(function_deserialize_t deserialize) {
-	function.deserialize = deserialize;
+	function.SetDeserializeCallback(deserialize);
+}
+
+inline void ScalarFunctionVariantBuilder::SetFilterPrune(propagate_filter_t filter_prune) {
+	function.SetFilterPruneCallback(filter_prune);
 }
 
 inline void ScalarFunctionVariantBuilder::SetDescription(const string &desc) {
@@ -104,7 +114,7 @@ inline void ScalarFunctionVariantBuilder::SetExample(const string &ex) {
 }
 
 inline void ScalarFunctionVariantBuilder::CanThrowErrors() {
-	function.errors = FunctionErrors::CAN_THROW_RUNTIME_ERROR;
+	function.SetFallible();
 }
 
 //------------------------------------------------------------------------------
@@ -153,7 +163,7 @@ void ScalarFunctionBuilder::AddVariant(CALLBACK &&callback) {
 	callback(builder);
 
 	// A return type is required
-	if (builder.function.return_type.id() == LogicalTypeId::INVALID) {
+	if (builder.function.GetReturnType().id() == LogicalTypeId::INVALID) {
 		throw InternalException("Return type not set in ScalarFunctionBuilder::AddVariant");
 	}
 
@@ -225,9 +235,7 @@ inline void AggregateFunctionBuilder::SetTag(const string &key, const string &va
 }
 
 inline void AggregateFunctionBuilder::CanThrowErrors() {
-	for (auto &function : set.functions) {
-		function.errors = FunctionErrors::CAN_THROW_RUNTIME_ERROR;
-	}
+	set.ApplyToFunctions([](AggregateFunction &function) { function.SetFallible(); });
 }
 
 //------------------------------------------------------------------------------

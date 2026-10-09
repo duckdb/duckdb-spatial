@@ -1,7 +1,10 @@
+# name: test/sql/gdal/gdal_shapefile.test
+# group: [gdal]
+
 require spatial
 
 # This used to fail because our GDAL filesytem wrapper was too aggressive in marking EOF
 query I
-SELECT COUNT(*) FROM st_read('__WORKING_DIRECTORY__/test/data/nyc_export/geo_export_42c9a823-5465-4f85-80b3-b294002094f2.shp');
+SELECT COUNT(*) FROM st_read('{WORKING_DIRECTORY}/test/data/nyc_export/geo_export_42c9a823-5465-4f85-80b3-b294002094f2.shp');
 ----
 5

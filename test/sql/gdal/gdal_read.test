@@ -1,26 +1,29 @@
+# name: test/sql/gdal/gdal_read.test
+# group: [gdal]
+
 require spatial
 
 query I
-SELECT COUNT(*) FROM st_read('__WORKING_DIRECTORY__/test/data/amsterdam_roads.fgb') WHERE kind = 'motorway'
+SELECT COUNT(*) FROM st_read('{WORKING_DIRECTORY}/test/data/amsterdam_roads.fgb') WHERE kind = 'motorway'
 ----
 870
 
 statement ok
-CREATE TABLE roads1 AS SELECT * FROM st_read('__WORKING_DIRECTORY__/test/data/amsterdam_roads.fgb') LIMIT 50;
+CREATE TABLE roads1 AS SELECT * FROM st_read('{WORKING_DIRECTORY}/test/data/amsterdam_roads.fgb') LIMIT 50;
 
 # Test Copy
 statement ok
-COPY (SELECT * FROM roads1) TO '__WORKING_DIRECTORY__/test/data/amsterdam_roads_50.geojson'
+COPY (SELECT * FROM roads1) TO '{WORKING_DIRECTORY}/test/data/amsterdam_roads_50.geojson'
 WITH (FORMAT GDAL, DRIVER 'GeoJSON', LAYER_CREATION_OPTIONS 'WRITE_BBOX=YES');
 
 # Test that the copy worked
 query I
-SELECT COUNT(*) FROM st_read('__WORKING_DIRECTORY__/test/data/amsterdam_roads_50.geojson');
+SELECT COUNT(*) FROM st_read('{WORKING_DIRECTORY}/test/data/amsterdam_roads_50.geojson');
 ----
 50
 
 statement ok
-CREATE TABLE roads2 AS SELECT * FROM st_read('__WORKING_DIRECTORY__/test/data/amsterdam_roads_50.geojson');
+CREATE TABLE roads2 AS SELECT * FROM st_read('{WORKING_DIRECTORY}/test/data/amsterdam_roads_50.geojson');
 
 # GDAL I/O should preserve order, so this is safe
 # Compare that the two tables are identical even though they were round-tripped through GDAL
