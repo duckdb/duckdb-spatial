@@ -30,7 +30,7 @@ struct ST_GeneratePoints {
 	};
 
 	static unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &input,
-	                                     vector<LogicalType> &return_types, vector<string> &names) {
+	                                     vector<LogicalType> &return_types, vector<Identifier> &names) {
 		auto result = make_uniq<GeneratePointsBindData>();
 
 		return_types.push_back(GeoTypes::POINT_2D());

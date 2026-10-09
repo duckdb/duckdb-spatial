@@ -291,7 +291,7 @@ struct ST_ReadSHP {
 	};
 
 	static unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &input,
-	                                     vector<LogicalType> &return_types, vector<string> &names) {
+	                                     vector<LogicalType> &return_types, vector<Identifier> &names) {
 
 		auto file_name = StringValue::Get(input.inputs[0]);
 		auto result = make_uniq<ShapefileBindData>(file_name);
@@ -412,7 +412,7 @@ struct ST_ReadSHP {
 			idx_t count = 1;
 			for (size_t j = i + 1; j < names.size(); j++) {
 				if (names[i] == names[j]) {
-					names[j] += "_" + std::to_string(count++);
+					names[j] = Identifier(names[j].GetIdentifierName() + "_" + std::to_string(count++));
 				}
 			}
 		}
@@ -946,7 +946,7 @@ struct Shapefile_Meta {
 	};
 
 	static unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &input,
-	                                     vector<LogicalType> &return_types, vector<string> &names) {
+	                                     vector<LogicalType> &return_types, vector<Identifier> &names) {
 
 		auto result = make_uniq<ShapeFileMetaBindData>();
 

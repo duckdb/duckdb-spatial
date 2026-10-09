@@ -39,7 +39,7 @@ struct BindData final : TableFunctionData {
 };
 
 unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &input, vector<LogicalType> &return_types,
-                              vector<string> &names) {
+                              vector<Identifier> &names) {
 
 	// Create an enum type for all osm kinds
 	vector<string_t> enum_values = {"node", "way", "relation", "changeset"};

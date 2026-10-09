@@ -24,7 +24,7 @@ namespace duckdb {
 
 // BIND
 static unique_ptr<FunctionData> RTreeindexInfoBind(ClientContext &context, TableFunctionBindInput &input,
-                                                   vector<LogicalType> &return_types, vector<string> &names) {
+                                                   vector<LogicalType> &return_types, vector<Identifier> &names) {
 	names.emplace_back("catalog_name");
 	return_types.emplace_back(LogicalType::VARCHAR);
 
@@ -147,7 +147,7 @@ struct RTreeIndexDumpBindData final : public TableFunctionData {
 };
 
 static unique_ptr<FunctionData> RTreeIndexDumpBind(ClientContext &context, TableFunctionBindInput &input,
-                                                   vector<LogicalType> &return_types, vector<string> &names) {
+                                                   vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = make_uniq<RTreeIndexDumpBindData>();
 
 	result->index_name = input.inputs[0].GetValue<string>();
