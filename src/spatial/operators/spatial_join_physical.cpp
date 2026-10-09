@@ -426,7 +426,7 @@ PhysicalSpatialJoin::PhysicalSpatialJoin(PhysicalPlan &physical_plan, LogicalOpe
 
 	// Always make sure we have a consistent order of the output columns, regardless if we have projection maps or not
 
-	const auto &lop = op.Cast<LogicalJoin>();
+	const auto &lop = op.Cast<LogicalSpatialJoin>();
 
 	// Probe-side
 	const auto &probe_side_input_types = children[0].get().types;
