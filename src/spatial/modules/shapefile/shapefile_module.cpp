@@ -124,7 +124,7 @@ struct EncodingUtil {
 SAFile DuckDBShapefileOpen(void *userData, const char *filename, const char *access_mode) {
 	try {
 		auto &fs = *static_cast<FileSystem *>(userData);
-		constexpr auto flags = FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_NULL_IF_NOT_EXISTS;
+		const auto flags = FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_NULL_IF_NOT_EXISTS;
 		auto file_handle = fs.OpenFile(filename, flags);
 		if (!file_handle) {
 			return nullptr;
@@ -194,7 +194,7 @@ int DuckDBShapefileClose(SAFile file) {
 int DuckDBShapefileRemove(void *userData, const char *filename) {
 	try {
 		auto &fs = *reinterpret_cast<FileSystem *>(userData);
-		constexpr auto flags = FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_NULL_IF_NOT_EXISTS;
+		const auto flags = FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_NULL_IF_NOT_EXISTS;
 		const auto file = fs.OpenFile(filename, flags);
 		if (!file) {
 			return -1;
