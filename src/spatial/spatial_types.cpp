@@ -73,7 +73,7 @@ LogicalType GeoTypes::CreateEnumType(const string &name, const vector<string> &m
 }
 
 static unique_ptr<FunctionData> PropagateTypesInternal(ClientContext &context, BoundSimpleFunction &bound_function,
-                                                       vector<unique_ptr<Expression>> &arguments) {
+                                                       const vector<unique_ptr<Expression>> &arguments) {
 
 	CoordinateReferenceSystem crs;
 	auto found_crs = false;
@@ -129,12 +129,8 @@ static unique_ptr<FunctionData> PropagateTypesInternal(ClientContext &context, B
 
 	return nullptr;
 }
-unique_ptr<FunctionData> GeoTypes::PropagateCRS(BindScalarFunctionInput &input) {
-	auto &context = input.GetClientContext();
-	auto &bound_function = input.GetBoundFunction();
-	auto &arguments = input.GetArguments();
-
-	return PropagateTypesInternal(context, bound_function, arguments);
+void GeoTypes::PropagateCRS(ResolveScalarFunctionTypesInput &input) {
+	PropagateTypesInternal(input.GetClientContext(), input.GetBoundFunction(), input.GetArguments());
 }
 
 unique_ptr<FunctionData> GeoTypes::PropagateCRS(BindAggregateFunctionInput &input) {

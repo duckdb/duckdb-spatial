@@ -53,6 +53,7 @@ public:
 	void SetFunction(scalar_function_t fn);
 	void SetInit(init_local_state_t init);
 	void SetBind(bind_scalar_function_t bind);
+	void SetResolveTypes(resolve_scalar_types_t resolve_types);
 	void SetSerialize(function_serialize_t serialize);
 	void SetDeserialize(function_deserialize_t deserialize);
 	void SetFilterPrune(propagate_filter_t filter_prune);
@@ -88,6 +89,10 @@ inline void ScalarFunctionVariantBuilder::SetInit(init_local_state_t init) {
 
 inline void ScalarFunctionVariantBuilder::SetBind(bind_scalar_function_t bind) {
 	function.SetBindCallback(bind);
+}
+
+inline void ScalarFunctionVariantBuilder::SetResolveTypes(resolve_scalar_types_t resolve_types) {
+	function.SetResolveTypesCallback(resolve_types);
 }
 inline void ScalarFunctionVariantBuilder::SetSerialize(function_serialize_t serialize) {
 	function.SetSerializeCallback(serialize);

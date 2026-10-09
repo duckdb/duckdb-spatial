@@ -28,9 +28,9 @@
 
 namespace duckdb {
 
-BindInfo RTreeIndexScanBindInfo(const optional_ptr<FunctionData> bind_data_p) {
+optional_ptr<TableCatalogEntry> RTreeIndexScanGetTableEntry(optional_ptr<const FunctionData> bind_data_p) {
 	auto &bind_data = bind_data_p->Cast<RTreeIndexScanBindData>();
-	return BindInfo(bind_data.table);
+	return &bind_data.table;
 }
 
 //-------------------------------------------------------------------------
@@ -572,7 +572,7 @@ TableFunction RTreeIndexScanFunction::GetFunction() {
 	func.table_scan_progress = nullptr;
 	func.projection_pushdown = true;
 	func.filter_pushdown = false;
-	func.get_bind_info = RTreeIndexScanBindInfo;
+	func.get_table_entry = RTreeIndexScanGetTableEntry;
 	func.serialize = RTreeScanSerialize;
 	func.deserialize = RTreeScanDeserialize;
 	func.get_virtual_columns = RTreeIndexScanGetVirtualColumns;

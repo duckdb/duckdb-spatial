@@ -248,46 +248,57 @@ struct ST_Transform {
 		}
 	};
 
+	//! Constant-folds the 'target_crs' parameter
+	static string GetTargetCRS(ClientContext &ctx, const Expression &crs_arg) {
+		if (crs_arg.HasParameter()) {
+			throw BinderException(crs_arg.GetQueryLocation(), "The 'target_crs' parameter must be a constant");
+		}
+		if (!crs_arg.IsFoldable()) {
+			throw BinderException(crs_arg.GetQueryLocation(), "The 'target_crs' parameter must be a constant");
+		}
+		if (crs_arg.GetReturnType().id() != LogicalTypeId::VARCHAR) {
+			throw BinderException(crs_arg.GetQueryLocation(), "The 'target_crs' parameter must be a string");
+		}
+		auto target_crs = StringValue::Get(ExpressionExecutor::EvaluateScalar(ctx, crs_arg));
+		if (target_crs.empty()) {
+			throw BinderException(crs_arg.GetQueryLocation(), "The 'target_crs' parameter cannot be empty");
+		}
+		return target_crs;
+	}
+
+	//! The source CRS is the CRS of the geometry type, which is kept by resolving the argument type before the cast
+	static void ResolveTypesTyped(ResolveScalarFunctionTypesInput &input) {
+		auto &ctx = input.GetClientContext();
+		auto &func = input.GetBoundFunction();
+
+		const auto &geo_arg = input.GetArgument(0);
+		const auto &geo_type = geo_arg.GetReturnType();
+		if (!GeoType::HasCRS(geo_type) || GeoType::GetCRS(geo_type).GetDefinition().empty()) {
+			throw BinderException(geo_arg.GetQueryLocation(),
+			                      "Source geometry must have a coordinate reference system");
+		}
+
+		const auto &crs_arg = input.GetArgument(1);
+		const auto target_crs = GetTargetCRS(ctx, crs_arg);
+		const auto result_crs = CoordinateReferenceSystem::TryIdentify(ctx, target_crs);
+		if (!result_crs) {
+			throw BinderException(crs_arg.GetQueryLocation(),
+			                      "The 'target_crs' parameter '%s' is not a recognized coordinate reference system",
+			                      target_crs);
+		}
+
+		func.GetArguments()[0] = geo_type;
+		func.SetReturnType(LogicalType::GEOMETRY(*result_crs));
+	}
+
 	static unique_ptr<FunctionData> BindTyped(BindScalarFunctionInput &input) {
 		auto &ctx = input.GetClientContext();
 		auto &func = input.GetBoundFunction();
 		auto &args = input.GetArguments();
 
 		auto result = make_uniq<TypedBindData>();
-
-		// Get CRS from source geometry
-		const auto &geo_arg = args[0];
-		if (!GeoType::HasCRS(geo_arg->GetReturnType())) {
-			throw BinderException(geo_arg->GetQueryLocation(),
-			                      "Source geometry must have a coordinate reference system");
-		}
-		result->source_crs = GeoType::GetCRS(geo_arg->GetReturnType()).GetDefinition();
-		if (result->source_crs.empty()) {
-			throw BinderException(geo_arg->GetQueryLocation(),
-			                      "Source geometry must have a coordinate reference system");
-		}
-
-		// Constant-fold target_crs
-		const auto &crs_arg = args[1];
-		if (crs_arg->HasParameter()) {
-			throw BinderException(crs_arg->GetQueryLocation(), "The 'target_crs' parameter must be a constant");
-		}
-		if (!crs_arg->IsFoldable()) {
-			throw BinderException(crs_arg->GetQueryLocation(), "The 'target_crs' parameter must be a constant");
-		}
-		if (crs_arg->GetReturnType().id() != LogicalTypeId::VARCHAR) {
-			throw BinderException(crs_arg->GetQueryLocation(), "The 'target_crs' parameter must be a string");
-		}
-		result->target_crs = StringValue::Get(ExpressionExecutor::EvaluateScalar(ctx, *crs_arg));
-		if (result->target_crs.empty()) {
-			throw BinderException(crs_arg->GetQueryLocation(), "The 'target_crs' parameter cannot be empty");
-		}
-		const auto result_crs = CoordinateReferenceSystem::TryIdentify(ctx, result->target_crs);
-		if (!result_crs) {
-			throw BinderException(crs_arg->GetQueryLocation(),
-			                      "The 'target_crs' parameter '%s' is not a recognized coordinate reference system",
-			                      result->target_crs);
-		}
+		result->source_crs = GeoType::GetCRS(func.GetArguments()[0]).GetDefinition();
+		result->target_crs = GetTargetCRS(ctx, *args[1]);
 
 		// Constant-fold always-xy, if present
 		auto explicit_normalize = false;
@@ -307,10 +318,6 @@ struct ST_Transform {
 		} else {
 			explicit_normalize = false;
 		}
-
-		// Set return types
-		func.GetArguments()[0] = geo_arg->GetReturnType();
-		func.SetReturnType(LogicalType::GEOMETRY(*result_crs));
 
 		// Check if we need to warn for this
 		if (!explicit_normalize) {
@@ -683,6 +690,7 @@ struct ST_Transform {
 				variant.SetReturnType(LogicalType::GEOMETRY());
 
 				variant.SetInit(LocalState::Init);
+				variant.SetResolveTypes(ResolveTypesTyped);
 				variant.SetBind(BindTyped);
 				variant.SetSerialize(TypedBindData::Serialize);
 				variant.SetDeserialize(TypedBindData::Deserialize);
@@ -697,6 +705,7 @@ struct ST_Transform {
 				variant.SetReturnType(LogicalType::GEOMETRY());
 
 				variant.SetInit(LocalState::Init);
+				variant.SetResolveTypes(ResolveTypesTyped);
 				variant.SetBind(BindTyped);
 				variant.SetSerialize(TypedBindData::Serialize);
 				variant.SetDeserialize(TypedBindData::Deserialize);
