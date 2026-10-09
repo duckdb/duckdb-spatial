@@ -191,7 +191,7 @@ static InsertionOrderPreservingMap<string> RTreeIndexScanToString(TableFunctionT
 // De/Serialize
 //-------------------------------------------------------------------------
 static void RTreeScanSerialize(Serializer &serializer, const optional_ptr<FunctionData> bind_data_p,
-                               const TableFunction &function) {
+                               const BoundTableFunction &function) {
 	auto &bind_data = bind_data_p->Cast<RTreeIndexScanBindData>();
 	serializer.WriteProperty(100, "catalog", bind_data.table.schema.catalog.GetName());
 	serializer.WriteProperty(101, "schema", bind_data.table.schema.name);
@@ -206,7 +206,8 @@ static void RTreeScanSerialize(Serializer &serializer, const optional_ptr<Functi
 	});
 }
 
-static unique_ptr<FunctionData> RTreeScanDeserialize(Deserializer &deserializer, TableFunction &function) {
+static unique_ptr<FunctionData> RTreeScanDeserialize(Deserializer &deserializer,
+                                                     BoundTableFunction &function) {
 	auto &context = deserializer.Get<ClientContext &>();
 
 	const auto catalog = deserializer.ReadProperty<string>(100, "catalog");

@@ -904,7 +904,8 @@ constexpr const char *DOC_EXAMPLE = R"(
 //  Register
 //------------------------------------------------------------------------------
 void RegisterOSMModule(ExtensionLoader &loader) {
-	TableFunction read("ST_ReadOSM", {LogicalType::VARCHAR}, Execute, Bind, InitGlobal, InitLocal);
+	TableFunction read("ST_ReadOSM", FunctionSignature().AddPositionalOnly("path", LogicalType::VARCHAR), Execute, Bind,
+	                   InitGlobal, InitLocal);
 
 	read.get_partition_data = GetPartitionData;
 	read.table_scan_progress = Progress;

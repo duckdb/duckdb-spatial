@@ -1328,19 +1328,22 @@ static constexpr auto EXAMPLE = R"(
 	)";
 
 void Register(ExtensionLoader &loader) {
-	TableFunction read_func("ST_Read", {LogicalType::VARCHAR}, Scan, Bind, InitGlobal);
+	FunctionSignature signature;
+	signature.AddParameter("file_name", LogicalType::VARCHAR).WithTypedKwargs("options", [&](TypedKwargs &options) {
+		options.Add("open_options", LogicalType::LIST(LogicalType::VARCHAR))
+		    .Add("allowed_drivers", LogicalType::LIST(LogicalType::VARCHAR))
+		    .Add("sibling_files", LogicalType::LIST(LogicalType::VARCHAR))
+		    .Add("layer", LogicalType::VARCHAR)
+		    .Add("max_batch_size", LogicalType::INTEGER)
+		    .Add("keep_wkb", LogicalType::BOOLEAN);
+	});
+
+	TableFunction read_func("ST_Read", std::move(signature), Scan, Bind, InitGlobal);
 	read_func.cardinality = Cardinality;
 	read_func.statistics = Statistics;
 	read_func.table_scan_progress = Progress;
 	read_func.pushdown_complex_filter = Pushdown;
 	read_func.to_string = ToString;
-
-	read_func.named_parameters["open_options"] = LogicalType::LIST(LogicalType::VARCHAR);
-	read_func.named_parameters["allowed_drivers"] = LogicalType::LIST(LogicalType::VARCHAR);
-	read_func.named_parameters["sibling_files"] = LogicalType::LIST(LogicalType::VARCHAR);
-	read_func.named_parameters["layer"] = LogicalType::VARCHAR;
-	read_func.named_parameters["max_batch_size"] = LogicalType::INTEGER;
-	read_func.named_parameters["keep_wkb"] = LogicalType::BOOLEAN;
 	read_func.parallelism = TableFunctionParallelism::SEQUENTIAL;
 
 	loader.RegisterFunction(read_func);
@@ -2185,7 +2188,8 @@ static constexpr auto EXAMPLE = R"(
 	)";
 
 static void Register(ExtensionLoader &loader) {
-	const TableFunction func("ST_Read_Meta", {LogicalType::VARCHAR}, Scan, Bind, InitGlobal);
+	const TableFunction func("ST_Read_Meta", FunctionSignature().AddPositionalOnly("path", LogicalType::VARCHAR), Scan,
+	                         Bind, InitGlobal);
 	loader.RegisterFunction(MultiFileReader::CreateFunctionSet(func));
 
 	InsertionOrderPreservingMap<string> tags;

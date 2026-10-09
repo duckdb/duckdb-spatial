@@ -251,8 +251,9 @@ void RTreeModule::RegisterIndexPragmas(ExtensionLoader &loader) {
 
 	loader.RegisterFunction(info_function);
 
-	TableFunction dump_function("rtree_index_dump", {LogicalType::VARCHAR}, RTreeIndexDumpExecute, RTreeIndexDumpBind,
-	                            RTreeIndexDumpInit);
+	TableFunction dump_function("rtree_index_dump",
+	                            FunctionSignature().AddPositionalOnly("index_name", LogicalType::VARCHAR),
+	                            RTreeIndexDumpExecute, RTreeIndexDumpBind, RTreeIndexDumpInit);
 
 	loader.RegisterFunction(dump_function);
 }

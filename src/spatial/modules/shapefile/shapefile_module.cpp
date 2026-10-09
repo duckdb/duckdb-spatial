@@ -890,9 +890,12 @@ struct ST_ReadSHP {
 	// Register
 	//------------------------------------------------------------------------------------------------------------------
 	static void Register(ExtensionLoader &loader) {
-		TableFunction read_func("ST_ReadSHP", {LogicalType::VARCHAR}, Execute, Bind, InitGlobal);
+		FunctionSignature signature;
+		signature.AddParameter("file_name", LogicalType::VARCHAR).WithTypedKwargs("options", [&](TypedKwargs &options) {
+			options.Add("encoding", LogicalType::VARCHAR);
+		});
 
-		read_func.named_parameters["encoding"] = LogicalType::VARCHAR;
+		TableFunction read_func("ST_ReadSHP", std::move(signature), Execute, Bind, InitGlobal);
 		read_func.table_scan_progress = GetProgress;
 		read_func.cardinality = GetCardinality;
 		read_func.projection_pushdown = true;
@@ -1069,7 +1072,8 @@ struct Shapefile_Meta {
 	}
 
 	static void Register(ExtensionLoader &loader) {
-		TableFunction meta_func("shapefile_meta", {LogicalType::VARCHAR}, Execute, Bind, InitGlobal);
+		TableFunction meta_func("shapefile_meta", FunctionSignature().AddPositionalOnly("path", LogicalType::VARCHAR),
+		                        Execute, Bind, InitGlobal);
 		meta_func.table_scan_progress = GetProgress;
 		meta_func.cardinality = GetCardinality;
 		loader.RegisterFunction(MultiFileReader::CreateFunctionSet(meta_func));

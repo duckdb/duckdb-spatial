@@ -198,7 +198,7 @@ public:
 	                           unique_ptr<LogicalOperator> &root, optional_ptr<LogicalFilter> filter,
 	                           optional_ptr<const ColumnIndex> filter_column_idx, unique_ptr<Expression> &filter_expr) {
 		auto &get = get_ptr->Cast<LogicalGet>();
-		if (get.function.name != "seq_scan") {
+		if (get.function.GetName() != "seq_scan") {
 			return false;
 		}
 
@@ -281,7 +281,7 @@ public:
 		}
 
 		// If there are no table filters pushed down into the get, we can just replace the get with the index scan
-		get.function = RTreeIndexScanFunction::GetFunction();
+		get.function = BoundTableFunction(RTreeIndexScanFunction::GetFunction());
 		const auto cardinality = get.function.cardinality(context, bind_data.get());
 		get.has_estimated_cardinality = cardinality->has_estimated_cardinality;
 		get.estimated_cardinality = cardinality->estimated_cardinality;
