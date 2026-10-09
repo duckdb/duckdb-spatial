@@ -389,7 +389,7 @@ static unique_ptr<Expression> GetBBOXExpression(ClientContext &context, const Lo
 	auto &catalog = Catalog::GetSystemCatalog(context);
 	auto &entry = catalog.GetEntry<ScalarFunctionCatalogEntry>(
 	    context, QualifiedName(catalog.GetName(), Identifier::DefaultSchema(), "ST_Extent_Approx"));
-	const auto &func = entry.functions.GetFunctionByArguments(context, {geom_type});
+	const auto &func = *entry.functions.GetFunctionByArguments(context, {geom_type});
 
 	auto child_expr = make_uniq<BoundReferenceExpression>(geom_type, 0);
 	vector<unique_ptr<Expression>> children;
@@ -550,7 +550,7 @@ public:
 		auto &catalog = Catalog::GetSystemCatalog(context);
 		auto &entry = catalog.GetEntry<ScalarFunctionCatalogEntry>(
 		    context, QualifiedName(catalog.GetName(), Identifier::DefaultSchema(), "ST_IsEmpty"));
-		const auto &func = entry.functions.GetFunctionByArguments(context, {geom_type});
+		const auto &func = *entry.functions.GetFunctionByArguments(context, {geom_type});
 
 		vector<unique_ptr<Expression>> children;
 		children.push_back(make_uniq_base<Expression, BoundReferenceExpression>(geom_type, 0));

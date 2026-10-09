@@ -114,7 +114,7 @@ RTreeIndex::RTreeIndex(const Identifier &name, IndexConstraintType index_constra
 	auto &catalog = Catalog::GetSystemCatalog(context);
 	auto &entry = catalog.GetEntry<ScalarFunctionCatalogEntry>(
 	    context, QualifiedName(catalog.GetName(), Identifier::DefaultSchema(), "ST_Extent_Approx"));
-	const auto &func = entry.functions.GetFunctionByArguments(context, {source_type});
+	const auto &func = *entry.functions.GetFunctionByArguments(context, {source_type});
 	auto child_expr = make_uniq<BoundReferenceExpression>(source_type, 0);
 
 	vector<unique_ptr<Expression>> children;

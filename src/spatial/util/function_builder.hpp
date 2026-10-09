@@ -225,9 +225,7 @@ inline void AggregateFunctionBuilder::SetTag(const string &key, const string &va
 }
 
 inline void AggregateFunctionBuilder::CanThrowErrors() {
-	for (auto &function : set.functions) {
-		function.SetFallible();
-	}
+	set.ApplyToFunctions([](AggregateFunction &function) { function.SetFallible(); });
 }
 
 //------------------------------------------------------------------------------

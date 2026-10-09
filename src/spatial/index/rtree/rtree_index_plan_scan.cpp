@@ -122,7 +122,7 @@ public:
 		auto &catalog = Catalog::GetSystemCatalog(context);
 		auto &entry = catalog.GetEntry<ScalarFunctionCatalogEntry>(
 		    context, QualifiedName(catalog.GetName(), Identifier::DefaultSchema(), "ST_Extent_Approx"));
-		const auto &func = entry.functions.GetFunctionByArguments(context, {LogicalType::GEOMETRY()});
+		const auto &func = *entry.functions.GetFunctionByArguments(context, {LogicalType::GEOMETRY()});
 
 		vector<unique_ptr<Expression>> children;
 		children.push_back(expr.Copy());
