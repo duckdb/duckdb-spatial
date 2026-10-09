@@ -300,7 +300,7 @@ static void AddIndexToCatalog(ClientContext &context, CreateRTreeIndexGlobalStat
 	duck_index.initial_index_size = gstate.rtree->Cast<BoundIndex>().GetInMemorySize();
 
 	// Finally add it to storage
-	storage.AddIndex(std::move(gstate.rtree));
+	storage.AddIndex(std::move(gstate.rtree), duck_index.oid);
 }
 
 class RTreeIndexConstructionEvent final : public BasePipelineEvent {
