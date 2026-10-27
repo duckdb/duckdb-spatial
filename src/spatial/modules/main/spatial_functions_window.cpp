@@ -10,6 +10,8 @@
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/function_entry.hpp"
 #include "duckdb/common/printer.hpp"
+#include "duckdb/common/random_engine.hpp"
+#include "duckdb/common/stl_allocator.hpp"
 #include "duckdb/common/types/geometry.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/function/window/window_boundaries_state.hpp"
@@ -31,36 +33,409 @@ namespace duckdb {
 namespace {
 
 //======================================================================================================================
-// ST_ClusterDBSCAN
+// Clustering Window Functions
 //======================================================================================================================
-// DBSCAN over each window partition, using an R-Tree for the neighbour searches and a concurrent union-find to merge
-// the core geometries into clusters.
+// Window functions that cluster all the geometries in each window partition, and return a cluster id for each row.
 //
-// A hash group (which can contain many partitions) is clustered in the window FINALIZE stage:
-//  - Each partition is read sequentially from the (buffer-managed) window collection into an in-memory R-Tree.
-//    Points are stored inline in the tree, other geometries are deserialized into arenas owned by the partition, with
-//    their polygon rings indexed to speed up the distance computations. Partitions that only contain points (which is
-//    checked by first scanning the geometry headers) use a smaller, point-only item type.
+// A hash group (which can contain many partitions) is clustered in the window FINALIZE stage. Every thread of the hash
+// group calls it, and none of them may return before the whole hash group has been clustered:
+//  - The geometries are materialized into the (buffer-managed) window collection, and are read from there.
 //  - Small partitions are clustered by a single thread each. Large partitions are clustered by all threads together,
-//    one partition at a time.
+//    one partition at a time, in stages that are defined by the clustering algorithm.
 //  - All memory used to cluster a partition is released as soon as its rows have been labeled, so that only the
 //    labels (one per row) are kept until the results have been emitted.
 //
+// A clustering ALGORITHM provides:
+//  - `NAME`, the `BindData` with the (constant) clustering parameters, and `Bind()`.
+//  - The `ThreadState` that its tasks need for each thread.
+//  - `ClusterPartition(context, begin, end)`, which clusters a small partition on the current thread.
+//  - The `StagedPartition`, which clusters a large partition in stages, with:
+//    - `StagedPartition(allocator, bind_data, begin, end, thread_count)`
+//    - `bool NextStage(idx_t &task_count)`, which moves on to the next stage, and returns false once the partition has
+//      been labeled. This is called by a single thread, once all the tasks of the previous stage have been executed.
+//    - `void ExecuteTask(context, task_idx)`, which executes a task of the current stage (concurrently).
+//    - `const char *GetStageName()`, for debugging.
+
+// #define DUCKDB_SPATIAL_DEBUG_CLUSTERING
+
+//! A vector whose memory is allocated (and tracked) by a DuckDB allocator. Used for everything that can be as large
+//! as the number of rows, so that it counts towards the memory limit.
+template <class T>
+using TrackedVector = vector<T, true, stl_allocator<T>>;
+
+//! Everything that a clustering task has access to
+template <class BIND_DATA, class THREAD_STATE>
+struct ClusteringContext {
+	Allocator &allocator;
+	//! The clustering parameters
+	const BIND_DATA &bind_data;
+	//! The cluster label of each row in the hash group (INVALID_INDEX for noise)
+	idx_t *labels;
+	//! Reads the geometries of the hash group
+	WindowCursor &cursor;
+	//! The thread executing the task
+	idx_t thread_idx;
+	//! The algorithm specific state of the thread
+	THREAD_STATE &thread_state;
+
+	//! Call `callback(row, blob)` for the hash group rows [beg_row, end_row), where blob is nullptr for NULL
+	//! geometries. Stops early if the callback returns false.
+	template <class CALLBACK>
+	void ScanGeometries(const idx_t beg_row, const idx_t end_row, CALLBACK &&callback) {
+		for (idx_t row = beg_row; row < end_row;) {
+			cursor.Seek(row);
+
+			// Process the rest of the scanned chunk
+			const auto chunk_beg = cursor.state.current_row_index;
+			const auto chunk_end = MinValue(end_row, cursor.state.next_row_index);
+			auto &geom_vec = cursor.chunk.data[0];
+			const auto geom_data = FlatVector::GetData<string_t>(geom_vec);
+
+			for (; row < chunk_end; row++) {
+				const auto chunk_idx = row - chunk_beg;
+				const auto blob = FlatVector::IsNull(geom_vec, chunk_idx) ? nullptr : &geom_data[chunk_idx];
+				if (!callback(row, blob)) {
+					return;
+				}
+			}
+		}
+	}
+};
+
+template <class ALGORITHM>
+struct ClusteringWindowFunction {
+	using BindData = typename ALGORITHM::BindData;
+	using ThreadState = typename ALGORITHM::ThreadState;
+	using StagedPartition = typename ALGORITHM::StagedPartition;
+	using Context = ClusteringContext<BindData, ThreadState>;
+
+	//! Partitions with more rows than this are clustered by all threads together
+	static constexpr idx_t PARALLEL_THRESHOLD = 8 * STANDARD_VECTOR_SIZE;
+
+	//------------------------------------------------------------------------------------------------------------------
+	// Global State
+	//------------------------------------------------------------------------------------------------------------------
+	enum class Stage : uint8_t { SMALL, LARGE, DONE };
+
+	struct Task {
+		Stage stage = Stage::DONE;
+		//! The small partition (SMALL), or the task of the current stage of the large partition (LARGE)
+		idx_t index = 0;
+	};
+
+	class GlobalState final : public WindowExecutorGlobalState {
+	public:
+		GlobalState(ClientContext &client, const WindowExecutor &executor, const idx_t payload_count,
+		            const ValidityMask &partition_mask, const ValidityMask &order_mask)
+		    : WindowExecutorGlobalState(client, executor, payload_count, partition_mask, order_mask),
+		      allocator(BufferAllocator::Get(client)), geom_idx(executor.child_idx[0]),
+		      bind_data(executor.wexpr.BindInfo()->Cast<BindData>()),
+		      labels(payload_count, DConstants::INVALID_INDEX, allocator), small_partitions(allocator) {
+
+			// Split the hash group into its partitions (the partition mask has been computed at this point)
+			for (idx_t beg = 0; beg < payload_count;) {
+				idx_t n = 1;
+				const auto end = WindowBoundariesState::FindNextStart(partition_mask, beg + 1, payload_count, n);
+				if (end - beg > PARALLEL_THRESHOLD) {
+					large_partitions.emplace_back(beg, end);
+				} else {
+					small_partitions.emplace_back(beg, end);
+				}
+				beg = end;
+			}
+
+			// Start by clustering all the small partitions
+			stage = Stage::SMALL;
+			total_tasks = small_partitions.size();
+		}
+
+		//! Get the next task to execute. Returns false if there is none available right now.
+		bool TryGetTask(Task &task) {
+			lock_guard<mutex> guard(lock);
+			while (stage != Stage::DONE) {
+				if (next_task < total_tasks) {
+					task.stage = stage;
+					task.index = next_task++;
+					return true;
+				}
+				if (completed_tasks < total_tasks) {
+					// Wait for the other threads to finish this stage
+					return false;
+				}
+				NextStage();
+			}
+			return false;
+		}
+
+		//! Stop handing out tasks (e.g. after an error)
+		void Abort() {
+			lock_guard<mutex> guard(lock);
+			stage = Stage::DONE;
+		}
+
+	private:
+		void NextStage() {
+			next_task = 0;
+			completed_tasks = 0;
+
+#ifdef DUCKDB_SPATIAL_DEBUG_CLUSTERING
+			// TODO: Move this into proper profiling metrics later
+			const auto now = std::chrono::steady_clock::now();
+			if (stage != Stage::DONE) {
+				const auto stage_name = stage == Stage::SMALL ? "SMALL" : large_partition->GetStageName();
+				Printer::PrintF("%s %s: %.3fs\n", ALGORITHM::NAME, stage_name,
+				                std::chrono::duration<double>(now - stage_start).count());
+			}
+			stage_start = now;
+#endif
+
+			idx_t task_count = 0;
+			if (stage == Stage::LARGE) {
+				if (large_partition->NextStage(task_count)) {
+					total_tasks = task_count;
+					return;
+				}
+				// Done with this large partition, release its memory
+				large_partition.reset();
+				large_partition_idx++;
+			}
+
+			// Start clustering the next large partition (if any)
+			for (; large_partition_idx < large_partitions.size(); large_partition_idx++) {
+				const auto &range = large_partitions[large_partition_idx];
+				large_partition =
+				    make_uniq<StagedPartition>(allocator, bind_data, range.first, range.second, thread_count.load());
+				if (large_partition->NextStage(task_count)) {
+					stage = Stage::LARGE;
+					total_tasks = task_count;
+					return;
+				}
+				large_partition.reset();
+			}
+
+			stage = Stage::DONE;
+			total_tasks = 0;
+		}
+
+	public:
+		Allocator &allocator;
+
+		//! The geometry column in the window collection
+		const column_t geom_idx;
+		//! The clustering parameters
+		const BindData &bind_data;
+
+		//! The cluster label of each row in the hash group (INVALID_INDEX for noise)
+		TrackedVector<idx_t> labels;
+
+		//! The [begin, end) rows of the partitions in the hash group. There can be as many small partitions as rows.
+		TrackedVector<pair<idx_t, idx_t>> small_partitions;
+		vector<pair<idx_t, idx_t>> large_partitions;
+
+		//! The number of threads working on this hash group (one per local state)
+		mutable atomic<idx_t> thread_count {0};
+
+		//! The current processing stage
+		atomic<Stage> stage {Stage::DONE};
+		//! The tasks of the current stage
+		idx_t total_tasks = 0;
+		idx_t next_task = 0;
+		atomic<idx_t> completed_tasks {0};
+
+		//! The large partition that is currently being clustered
+		idx_t large_partition_idx = 0;
+		unique_ptr<StagedPartition> large_partition;
+
+#ifdef DUCKDB_SPATIAL_DEBUG_CLUSTERING
+		std::chrono::steady_clock::time_point stage_start = std::chrono::steady_clock::now();
+#endif
+
+	private:
+		mutex lock;
+	};
+
+	//------------------------------------------------------------------------------------------------------------------
+	// Local State
+	//------------------------------------------------------------------------------------------------------------------
+	class LocalState final : public WindowExecutorLocalState {
+	public:
+		LocalState(ExecutionContext &context, const GlobalState &gstate)
+		    : WindowExecutorLocalState(context, gstate), thread_idx(gstate.thread_count++) {
+		}
+
+		//! The index of this thread within the hash group
+		const idx_t thread_idx;
+		//! Reads the geometries from the window collection
+		unique_ptr<WindowCursor> cursor;
+		//! The algorithm specific state of this thread
+		ThreadState thread_state;
+	};
+
+	static void ExecuteTask(GlobalState &gstate, LocalState &lstate, const Task &task) {
+		Context context {gstate.allocator, gstate.bind_data,  gstate.labels.data(),
+		                 *lstate.cursor,   lstate.thread_idx, lstate.thread_state};
+
+		switch (task.stage) {
+		case Stage::SMALL: {
+			const auto &range = gstate.small_partitions[task.index];
+			ALGORITHM::ClusterPartition(context, range.first, range.second);
+		} break;
+		case Stage::LARGE:
+			gstate.large_partition->ExecuteTask(context, task.index);
+			break;
+		case Stage::DONE:
+			break;
+		}
+	}
+
+	//------------------------------------------------------------------------------------------------------------------
+	// Window Function Callbacks
+	//------------------------------------------------------------------------------------------------------------------
+	static void GetSharing(WindowExecutor &executor, WindowSharedExpressions &shared) {
+		// Only materialize the geometries, the (constant) parameters are in the bind data
+		const auto &wexpr = executor.wexpr;
+		executor.child_idx.emplace_back(shared.RegisterCollection(wexpr.GetChildren()[0], false));
+	}
+
+	static unique_ptr<GlobalSinkState> GetGlobal(ClientContext &client, const WindowExecutor &executor,
+	                                             const idx_t payload_count, const ValidityMask &partition_mask,
+	                                             const ValidityMask &order_mask) {
+		return make_uniq<GlobalState>(client, executor, payload_count, partition_mask, order_mask);
+	}
+
+	static unique_ptr<LocalSinkState> GetLocal(ExecutionContext &context, const GlobalSinkState &gstate) {
+		return make_uniq<LocalState>(context, gstate.Cast<GlobalState>());
+	}
+
+	static void Finalize(ExecutionContext &context, optional_ptr<WindowCollection> collection,
+	                     OperatorSinkInput &sink) {
+		auto &gstate = sink.global_state.Cast<GlobalState>();
+		auto &lstate = sink.local_state.Cast<LocalState>();
+
+		D_ASSERT(collection);
+		lstate.cursor = make_uniq<WindowCursor>(*collection, gstate.geom_idx);
+
+		// Every thread of the hash group calls this, and none may return before all the clustering is done
+		try {
+			Task task;
+			while (gstate.stage.load() != Stage::DONE) {
+				if (!gstate.TryGetTask(task)) {
+					std::this_thread::yield();
+					continue;
+				}
+				ExecuteTask(gstate, lstate, task);
+				++gstate.completed_tasks;
+			}
+		} catch (...) {
+			// Make sure the other threads stop waiting for us
+			gstate.Abort();
+			throw;
+		}
+
+		// Unpin the collection
+		lstate.cursor.reset();
+	}
+
+	static void Evaluate(ExecutionContext &context, DataChunk &eval_chunk, DataChunk &bounds, Vector &result,
+	                     idx_t row_idx, OperatorSinkInput &sink) {
+		auto &gstate = sink.global_state.Cast<GlobalState>();
+		const auto count = eval_chunk.size();
+
+		auto writer = FlatVector::Writer<int64_t>(result, count);
+		for (idx_t i = 0; i < count; i++) {
+			const auto label = gstate.labels[row_idx + i];
+			if (label == DConstants::INVALID_INDEX) {
+				writer.WriteNull();
+			} else {
+				writer.WriteValue(UnsafeNumericCast<int64_t>(label));
+			}
+		}
+	}
+
+	//------------------------------------------------------------------------------------------------------------------
+	// Function
+	//------------------------------------------------------------------------------------------------------------------
+	//! Get the window function, without its parameters
+	static WindowFunction GetFunction() {
+		WindowFunction function(ALGORITHM::NAME, {}, LogicalType::BIGINT, ExpressionType::WINDOW_FUNCTION,
+		                        ALGORITHM::Bind, nullptr, GetSharing, GetGlobal, GetLocal, nullptr, Finalize, Evaluate);
+		function.SetCanOrderBy(false);
+		function.SetCanIgnoreNulls(false);
+		function.SetFallible();
+		return function;
+	}
+};
+
+//======================================================================================================================
+// ST_ClusterDBSCAN
+//======================================================================================================================
+// DBSCAN over each window partition, using an R-Tree for the neighbour searches and a concurrent union-find to merge
+// the core geometries into clusters:
+//  - Each partition is loaded into an in-memory R-Tree. Points are stored inline in the tree, other geometries are
+//    deserialized into arenas owned by the partition, with their polygon rings indexed to speed up the distance
+//    computations. Partitions that only contain points (which is checked by first scanning the geometry headers) use
+//    a smaller, point-only item type.
+//  - The core geometries are found with a search for their neighbours, and then merged with their core neighbours,
+//    while the other geometries are attached to their first core neighbour (if any).
+//
 // Clusters are numbered in the order of their first core geometry, and border geometries are assigned to the cluster
 // of their first core neighbour, so the result is deterministic for a given partition order.
-
-// #define DUCKDB_SPATIAL_DEBUG_DBSCAN
 
 struct ST_ClusterDBSCAN {
 
 	static constexpr auto NAME = "ST_ClusterDBSCAN";
 
-	//! The number of rows per task when clustering a large partition
+	//! The number of rows (or R-Tree leaves) per task when clustering a large partition
 	static constexpr idx_t MORSEL_SIZE = STANDARD_VECTOR_SIZE;
-	//! Partitions with more rows than this are clustered by all threads together
-	static constexpr idx_t PARALLEL_THRESHOLD = 8 * MORSEL_SIZE;
 
 	using Box = Box2D<float>;
+
+	//------------------------------------------------------------------------------------------------------------------
+	// Bind Data
+	//------------------------------------------------------------------------------------------------------------------
+	// There is no serialization for this, which is fine: the function is just bound again when deserializing.
+	class BindData final : public FunctionData {
+	public:
+		BindData(const double eps_p, const idx_t min_points_p) : eps(eps_p), min_points(min_points_p) {
+		}
+
+		unique_ptr<FunctionData> Copy() const override {
+			return make_uniq<BindData>(eps, min_points);
+		}
+
+		bool Equals(const FunctionData &other_p) const override {
+			const auto &other = other_p.Cast<BindData>();
+			return eps == other.eps && min_points == other.min_points;
+		}
+
+		//! The maximum neighbour distance
+		const double eps;
+		//! The minimum number of neighbours (including itself) for a geometry to be a core geometry
+		const idx_t min_points;
+	};
+
+	static unique_ptr<FunctionData> Bind(BindWindowFunctionInput &input) {
+		// The parameters must be constant
+		const auto eps = input.GetNonNullConstant(1).GetValue<double>();
+		const auto min_points = input.GetNonNullConstant(2).GetValue<int64_t>();
+		if (std::isnan(eps) || eps < 0) {
+			throw BinderException("%s: eps must be a non-negative number, got %f", NAME, eps);
+		}
+		if (min_points < 0) {
+			throw BinderException("%s: minpoints must be a non-negative number, got %lld", NAME, min_points);
+		}
+		return make_uniq<BindData>(eps, UnsafeNumericCast<idx_t>(min_points));
+	}
+
+	//------------------------------------------------------------------------------------------------------------------
+	// Thread State
+	//------------------------------------------------------------------------------------------------------------------
+	struct ThreadState {
+		//! Searches the R-Tree
+		FlatRTreeScanState scan;
+	};
+
+	using Context = ClusteringContext<BindData, ThreadState>;
 
 	//------------------------------------------------------------------------------------------------------------------
 	// Items
@@ -265,36 +640,10 @@ struct ST_ClusterDBSCAN {
 		}
 	};
 
-	//------------------------------------------------------------------------------------------------------------------
-	// Scanning
-	//------------------------------------------------------------------------------------------------------------------
-	//! Call `callback(row, blob)` for the hash group rows [beg_row, end_row) of the window collection, where blob is
-	//! nullptr for NULL geometries. Stops early if the callback returns false.
-	template <class CALLBACK>
-	static void ScanRows(WindowCursor &cursor, const idx_t beg_row, const idx_t end_row, CALLBACK &&callback) {
-		for (idx_t row = beg_row; row < end_row;) {
-			cursor.Seek(row);
-
-			// Process the rest of the scanned chunk
-			const auto chunk_beg = cursor.state.current_row_index;
-			const auto chunk_end = MinValue(end_row, cursor.state.next_row_index);
-			auto &geom_vec = cursor.chunk.data[0];
-			const auto geom_data = FlatVector::GetData<string_t>(geom_vec);
-
-			for (; row < chunk_end; row++) {
-				const auto chunk_idx = row - chunk_beg;
-				const auto blob = FlatVector::IsNull(geom_vec, chunk_idx) ? nullptr : &geom_data[chunk_idx];
-				if (!callback(row, blob)) {
-					return;
-				}
-			}
-		}
-	}
-
 	//! Check if all the (non-NULL) geometries in the hash group rows [beg_row, end_row) are points
-	static bool HasOnlyPoints(WindowCursor &cursor, const idx_t beg_row, const idx_t end_row) {
+	static bool HasOnlyPoints(Context &context, const idx_t beg_row, const idx_t end_row) {
 		auto only_points = true;
-		ScanRows(cursor, beg_row, end_row, [&](const idx_t, const string_t *blob) {
+		context.ScanGeometries(beg_row, end_row, [&](const idx_t, const string_t *blob) {
 			// This only reads the header of the geometry
 			only_points = !blob || Geometry::GetType(*blob).first == GeometryType::POINT;
 			return only_points;
@@ -311,12 +660,8 @@ struct ST_ClusterDBSCAN {
 	public:
 		Partition(Allocator &allocator_p, const idx_t begin_p, const idx_t end_p, const idx_t thread_count)
 		    : allocator(allocator_p), begin(begin_p), end(end_p), tree(allocator_p, end_p - begin_p, ITEM::NODE_SIZE),
-		      arenas(thread_count) {
+		      parent(end_p - begin_p, allocator_p), core(end_p - begin_p, allocator_p), arenas(thread_count) {
 			D_ASSERT(begin < end);
-			parent_data = allocator.Allocate(Count() * sizeof(atomic<idx_t>));
-			core_data = allocator.Allocate(Count() * sizeof(bool));
-			parent = reinterpret_cast<atomic<idx_t> *>(parent_data.get());
-			core = reinterpret_cast<bool *>(core_data.get());
 		}
 
 		//! The number of rows in the partition
@@ -325,11 +670,11 @@ struct ST_ClusterDBSCAN {
 		}
 
 		//! Load the partition rows [beg_idx, end_idx) into the R-Tree, using the arena of the given thread (if needed)
-		void Load(WindowCursor &cursor, const idx_t beg_idx, const idx_t end_idx, const idx_t thread_idx) {
+		void Load(Context &context, const idx_t beg_idx, const idx_t end_idx, const idx_t thread_idx) {
 			const auto get_arena = [&]() -> ArenaAllocator & {
 				return GetArena(thread_idx);
 			};
-			ScanRows(cursor, begin + beg_idx, begin + end_idx, [&](const idx_t row, const string_t *blob) {
+			context.ScanGeometries(begin + beg_idx, begin + end_idx, [&](const idx_t row, const string_t *blob) {
 				const auto i = row - begin;
 				auto item = ITEM::Invalid();
 				auto box = Box();
@@ -337,7 +682,7 @@ struct ST_ClusterDBSCAN {
 					ITEM::Load(*blob, get_arena, item, box);
 				}
 				tree.Set(i, box, item);
-				new (&parent[i]) atomic<idx_t>(i);
+				parent[i].store(i);
 				core[i] = false;
 				return true;
 			});
@@ -424,7 +769,7 @@ struct ST_ClusterDBSCAN {
 		}
 
 		//! Assign the cluster labels of the partition rows (in the labels of the whole hash group)
-		void Label(idx_t *hash_group_labels) const {
+		void Label(idx_t *hash_group_labels) {
 			const auto count = Count();
 			const auto labels = hash_group_labels + begin;
 
@@ -451,7 +796,7 @@ struct ST_ClusterDBSCAN {
 
 	private:
 		//! Find the root of a cluster. Only valid for core rows.
-		idx_t Find(idx_t row) const {
+		idx_t Find(idx_t row) {
 			// Parents always have a lower row number than their children, so the root is the lowest row in the
 			// cluster. This also means that "halving" the path (pointing each row to its grandparent) is always safe.
 			while (true) {
@@ -468,7 +813,7 @@ struct ST_ClusterDBSCAN {
 		}
 
 		//! Merge the clusters of two core rows
-		void Union(idx_t lhs, idx_t rhs) const {
+		void Union(idx_t lhs, idx_t rhs) {
 			while (true) {
 				lhs = Find(lhs);
 				rhs = Find(rhs);
@@ -509,403 +854,166 @@ struct ST_ClusterDBSCAN {
 
 		//! The union-find forest over the core rows. For non-core rows, this holds the first core neighbour instead
 		//! (or the row itself if there is none), which is never traversed by Find().
-		AllocatedData parent_data;
-		atomic<idx_t> *parent;
+		TrackedVector<atomic<idx_t>> parent;
 
-		//! Whether a row is a core row
-		AllocatedData core_data;
-		bool *core;
+		//! Whether a row is a core row (not a vector<bool>, since the rows are written concurrently)
+		TrackedVector<uint8_t> core;
 
 		//! The arenas holding deserialized geometries (if the items need them), one per loading thread
 		vector<unique_ptr<ArenaAllocator>> arenas;
 	};
 
 	//------------------------------------------------------------------------------------------------------------------
-	// Bind Data
+	// Clustering
 	//------------------------------------------------------------------------------------------------------------------
-	// There is no serialization for this, which is fine: the function is just bound again when deserializing.
-	class BindData final : public FunctionData {
+	//! Cluster a whole (small) partition on the current thread
+	static void ClusterPartition(Context &context, const idx_t begin, const idx_t end) {
+		if (HasOnlyPoints(context, begin, end)) {
+			ClusterPartition<PointItem>(context, begin, end);
+		} else {
+			ClusterPartition<GeometryItem>(context, begin, end);
+		}
+	}
+
+	template <class ITEM>
+	static void ClusterPartition(Context &context, const idx_t begin, const idx_t end) {
+		const Eps eps(context.bind_data.eps);
+		Partition<ITEM> partition(context.allocator, begin, end, 1);
+		const auto count = partition.Count();
+		partition.Load(context, 0, count, 0);
+		partition.Build();
+		partition.FindCore(eps, context.bind_data.min_points, context.thread_state.scan, 0, count);
+		partition.FindClusters(eps, context.thread_state.scan, 0, count);
+		partition.Label(context.labels);
+	}
+
+	//! A large partition, clustered by all threads together
+	class StagedPartition {
 	public:
-		BindData(const double eps_p, const idx_t min_points_p) : eps(eps_p), min_points(min_points_p) {
+		StagedPartition(Allocator &allocator_p, const BindData &bind_data_p, const idx_t begin_p, const idx_t end_p,
+		                const idx_t thread_count_p)
+		    : allocator(allocator_p), bind_data(bind_data_p), eps(bind_data_p.eps), begin(begin_p), end(end_p),
+		      thread_count(thread_count_p) {
 		}
 
-		unique_ptr<FunctionData> Copy() const override {
-			return make_uniq<BindData>(eps, min_points);
-		}
-
-		bool Equals(const FunctionData &other_p) const override {
-			const auto &other = other_p.Cast<BindData>();
-			return eps == other.eps && min_points == other.min_points;
-		}
-
-		//! The maximum neighbour distance
-		const double eps;
-		//! The minimum number of neighbours (including itself) for a geometry to be a core geometry
-		const idx_t min_points;
-	};
-
-	//------------------------------------------------------------------------------------------------------------------
-	// Global State
-	//------------------------------------------------------------------------------------------------------------------
-	enum class Stage : uint8_t { SMALL, SCAN, LOAD, BUILD, CORE, UNION, LABEL, DONE };
-
-	struct Task {
-		Stage stage = Stage::DONE;
-		//! The small partition index (SMALL), the partition rows (SCAN, LOAD) or the tree leaves (CORE, UNION) of the
-		//! morsel
-		idx_t begin = 0;
-		idx_t end = 0;
-	};
-
-	class GlobalState final : public WindowExecutorGlobalState {
-	public:
-		GlobalState(ClientContext &client, const WindowExecutor &executor, const idx_t payload_count,
-		            const ValidityMask &partition_mask, const ValidityMask &order_mask)
-		    : WindowExecutorGlobalState(client, executor, payload_count, partition_mask, order_mask),
-		      allocator(BufferAllocator::Get(client)), geom_idx(executor.child_idx[0]),
-		      bind_data(executor.wexpr.BindInfo()->Cast<BindData>()) {
-
-			if (payload_count > 0) {
-				labels_data = allocator.Allocate(payload_count * sizeof(idx_t));
-				labels = reinterpret_cast<idx_t *>(labels_data.get());
-				std::fill_n(labels, payload_count, DConstants::INVALID_INDEX);
-			}
-
-			// Split the hash group into its partitions (the partition mask has been computed at this point)
-			for (idx_t beg = 0; beg < payload_count;) {
-				idx_t n = 1;
-				const auto end = WindowBoundariesState::FindNextStart(partition_mask, beg + 1, payload_count, n);
-				if (end - beg > PARALLEL_THRESHOLD) {
-					large_partitions.emplace_back(beg, end);
+		bool NextStage(idx_t &task_count) {
+			switch (stage) {
+			case Stage::INIT:
+				// Start by checking whether the partition only contains points
+				stage = Stage::SCAN;
+				task_count = GetMorselCount();
+				return true;
+			case Stage::SCAN:
+				if (has_non_points) {
+					geometry_partition = make_uniq<Partition<GeometryItem>>(allocator, begin, end, thread_count);
 				} else {
-					small_partitions.emplace_back(beg, end);
+					point_partition = make_uniq<Partition<PointItem>>(allocator, begin, end, thread_count);
 				}
-				beg = end;
-			}
-
-			// Start by clustering all the small partitions
-			stage = Stage::SMALL;
-			total_tasks = small_partitions.size();
-		}
-
-		//! Get the next task to execute. Returns false if there is none available right now.
-		bool TryGetTask(Task &task) {
-			lock_guard<mutex> guard(lock);
-			while (stage != Stage::DONE) {
-				if (next_task < total_tasks) {
-					const auto task_idx = next_task++;
-					task.stage = stage;
-					if (stage == Stage::SMALL) {
-						task.begin = task_idx;
-						task.end = task_idx + 1;
-					} else {
-						task.begin = task_idx * MORSEL_SIZE;
-						task.end = MinValue(task.begin + MORSEL_SIZE, GetLargePartitionCount());
-					}
-					return true;
-				}
-				if (completed_tasks < total_tasks) {
-					// Wait for the other threads to finish this stage
-					return false;
-				}
-				NextStage();
+				stage = Stage::LOAD;
+				task_count = GetMorselCount();
+				return true;
+			case Stage::LOAD:
+				stage = Stage::BUILD;
+				task_count = 1;
+				return true;
+			case Stage::BUILD:
+				stage = Stage::CORE;
+				task_count = GetMorselCount();
+				return true;
+			case Stage::CORE:
+				stage = Stage::UNION;
+				task_count = GetMorselCount();
+				return true;
+			case Stage::UNION:
+				stage = Stage::LABEL;
+				task_count = 1;
+				return true;
+			case Stage::LABEL:
+			case Stage::DONE:
+				stage = Stage::DONE;
+				return false;
 			}
 			return false;
 		}
 
-		//! Stop handing out tasks (e.g. after an error)
-		void Abort() {
-			lock_guard<mutex> guard(lock);
-			stage = Stage::DONE;
+		void ExecuteTask(Context &context, const idx_t task_idx) {
+			const auto beg_idx = task_idx * MORSEL_SIZE;
+			const auto end_idx = MinValue(beg_idx + MORSEL_SIZE, end - begin);
+
+			if (stage == Stage::SCAN) {
+				if (has_non_points) {
+					// Another thread already found a geometry that is not a point
+					return;
+				}
+				if (!HasOnlyPoints(context, begin + beg_idx, begin + end_idx)) {
+					has_non_points = true;
+				}
+				return;
+			}
+
+			if (point_partition) {
+				ExecuteTask(*point_partition, context, beg_idx, end_idx);
+			} else {
+				ExecuteTask(*geometry_partition, context, beg_idx, end_idx);
+			}
+		}
+
+		const char *GetStageName() const {
+			static constexpr const char *STAGE_NAMES[] = {"INIT", "SCAN",  "LOAD",  "BUILD",
+			                                              "CORE", "UNION", "LABEL", "DONE"};
+			return STAGE_NAMES[static_cast<uint8_t>(stage)];
 		}
 
 	private:
-		void NextStage() {
-			next_task = 0;
-			completed_tasks = 0;
+		enum class Stage : uint8_t { INIT, SCAN, LOAD, BUILD, CORE, UNION, LABEL, DONE };
 
-#ifdef DUCKDB_SPATIAL_DEBUG_DBSCAN
-			// TODO: Move this into proper profiling metrics later
-			static constexpr const char *STAGE_NAMES[] = {"SMALL", "SCAN", "LOAD", "BUILD", "CORE", "UNION", "LABEL"};
-			const auto now = std::chrono::steady_clock::now();
-			if (stage != Stage::DONE) {
-				Printer::PrintF("ST_ClusterDBSCAN %s: %.3fs\n", STAGE_NAMES[static_cast<uint8_t>(stage.load())],
-				                std::chrono::duration<double>(now - stage_start).count());
-			}
-			stage_start = now;
-#endif
-
-			switch (stage.load()) {
-			case Stage::LABEL:
-				// Done with this large partition, release its memory
-				large_point_partition.reset();
-				large_geometry_partition.reset();
-				large_partition_idx++;
-				DUCKDB_EXPLICIT_FALLTHROUGH;
-			case Stage::SMALL:
-				if (large_partition_idx < large_partitions.size()) {
-					// Start clustering the next large partition, by checking whether it only contains points
-					has_non_points = false;
-					stage = Stage::SCAN;
-					total_tasks = GetMorselCount();
-				} else {
-					stage = Stage::DONE;
-					total_tasks = 0;
-				}
-				break;
-			case Stage::SCAN: {
-				const auto &range = large_partitions[large_partition_idx];
-				if (has_non_points) {
-					large_geometry_partition = make_uniq<Partition<GeometryItem>>(allocator, range.first, range.second,
-					                                                              thread_count.load());
-				} else {
-					large_point_partition =
-					    make_uniq<Partition<PointItem>>(allocator, range.first, range.second, thread_count.load());
-				}
-				stage = Stage::LOAD;
-				total_tasks = GetMorselCount();
-			} break;
+		template <class ITEM>
+		void ExecuteTask(Partition<ITEM> &partition, Context &context, const idx_t beg_idx, const idx_t end_idx) {
+			switch (stage) {
 			case Stage::LOAD:
-				stage = Stage::BUILD;
-				total_tasks = 1;
+				partition.Load(context, beg_idx, end_idx, context.thread_idx);
 				break;
 			case Stage::BUILD:
-				stage = Stage::CORE;
-				total_tasks = GetMorselCount();
+				partition.Build();
 				break;
 			case Stage::CORE:
-				stage = Stage::UNION;
-				total_tasks = GetMorselCount();
+				partition.FindCore(eps, bind_data.min_points, context.thread_state.scan, beg_idx, end_idx);
 				break;
 			case Stage::UNION:
-				stage = Stage::LABEL;
-				total_tasks = 1;
+				partition.FindClusters(eps, context.thread_state.scan, beg_idx, end_idx);
 				break;
-			case Stage::DONE:
+			case Stage::LABEL:
+				partition.Label(context.labels);
 				break;
+			default:
+				throw InternalException("%s: unexpected stage %s", NAME, GetStageName());
 			}
-		}
-
-		idx_t GetLargePartitionCount() const {
-			const auto &range = large_partitions[large_partition_idx];
-			return range.second - range.first;
 		}
 
 		idx_t GetMorselCount() const {
-			return (GetLargePartitionCount() + MORSEL_SIZE - 1) / MORSEL_SIZE;
+			return (end - begin + MORSEL_SIZE - 1) / MORSEL_SIZE;
 		}
-
-	public:
-		Allocator &allocator;
-
-		//! The geometry column in the window collection
-		const column_t geom_idx;
-		//! The clustering parameters
-		const BindData &bind_data;
-
-		//! The cluster label of each row in the hash group (INVALID_INDEX for noise)
-		AllocatedData labels_data;
-		idx_t *labels = nullptr;
-
-		//! The [begin, end) rows of the partitions in the hash group
-		vector<pair<idx_t, idx_t>> small_partitions;
-		vector<pair<idx_t, idx_t>> large_partitions;
-
-		//! The number of threads working on this hash group (one per local state)
-		mutable atomic<idx_t> thread_count {0};
-
-		//! The current processing stage
-		atomic<Stage> stage {Stage::DONE};
-		//! The tasks of the current stage
-		idx_t total_tasks = 0;
-		idx_t next_task = 0;
-		atomic<idx_t> completed_tasks {0};
-
-		//! The large partition currently being clustered (either with points only, or with any geometries)
-		idx_t large_partition_idx = 0;
-		unique_ptr<Partition<PointItem>> large_point_partition;
-		unique_ptr<Partition<GeometryItem>> large_geometry_partition;
-		//! Whether the large partition contains geometries that are not points (determined in the SCAN stage)
-		atomic<bool> has_non_points {false};
-
-#ifdef DUCKDB_SPATIAL_DEBUG_DBSCAN
-		std::chrono::steady_clock::time_point stage_start = std::chrono::steady_clock::now();
-#endif
 
 	private:
-		mutex lock;
+		Allocator &allocator;
+		const BindData &bind_data;
+		const Eps eps;
+
+		//! The rows of the partition within the hash group
+		const idx_t begin;
+		const idx_t end;
+		//! The number of threads working on the partition
+		const idx_t thread_count;
+
+		Stage stage = Stage::INIT;
+
+		//! Whether the partition contains geometries that are not points (determined in the SCAN stage)
+		atomic<bool> has_non_points {false};
+
+		//! The partition, either with points only, or with any geometries
+		unique_ptr<Partition<PointItem>> point_partition;
+		unique_ptr<Partition<GeometryItem>> geometry_partition;
 	};
-
-	//------------------------------------------------------------------------------------------------------------------
-	// Local State
-	//------------------------------------------------------------------------------------------------------------------
-	class LocalState final : public WindowExecutorLocalState {
-	public:
-		LocalState(ExecutionContext &context, const GlobalState &gstate)
-		    : WindowExecutorLocalState(context, gstate), thread_idx(gstate.thread_count++) {
-		}
-
-		//! The index of this thread within the hash group
-		const idx_t thread_idx;
-		//! Reads the geometries from the window collection
-		unique_ptr<WindowCursor> cursor;
-		//! Searches the R-Tree
-		FlatRTreeScanState scan;
-	};
-
-	//------------------------------------------------------------------------------------------------------------------
-	// Clustering
-	//------------------------------------------------------------------------------------------------------------------
-	//! Cluster a whole (small) partition on this thread
-	template <class ITEM>
-	static void ClusterPartition(GlobalState &gstate, LocalState &lstate, const idx_t begin, const idx_t end) {
-		const auto &bind_data = gstate.bind_data;
-		const Eps eps(bind_data.eps);
-		Partition<ITEM> partition(gstate.allocator, begin, end, 1);
-		const auto count = partition.Count();
-		partition.Load(*lstate.cursor, 0, count, 0);
-		partition.Build();
-		partition.FindCore(eps, bind_data.min_points, lstate.scan, 0, count);
-		partition.FindClusters(eps, lstate.scan, 0, count);
-		partition.Label(gstate.labels);
-	}
-
-	//! Execute a stage task of the large partition that is currently being clustered
-	template <class ITEM>
-	static void ExecuteStage(GlobalState &gstate, LocalState &lstate, Partition<ITEM> &partition, const Task &task) {
-		const auto &bind_data = gstate.bind_data;
-		const Eps eps(bind_data.eps);
-		switch (task.stage) {
-		case Stage::LOAD:
-			partition.Load(*lstate.cursor, task.begin, task.end, lstate.thread_idx);
-			break;
-		case Stage::BUILD:
-			partition.Build();
-			break;
-		case Stage::CORE:
-			partition.FindCore(eps, bind_data.min_points, lstate.scan, task.begin, task.end);
-			break;
-		case Stage::UNION:
-			partition.FindClusters(eps, lstate.scan, task.begin, task.end);
-			break;
-		case Stage::LABEL:
-			partition.Label(gstate.labels);
-			break;
-		default:
-			throw InternalException("%s: unexpected stage for a large partition", NAME);
-		}
-	}
-
-	static void ExecuteTask(GlobalState &gstate, LocalState &lstate, const Task &task) {
-		auto &cursor = *lstate.cursor;
-
-		switch (task.stage) {
-		case Stage::SMALL: {
-			const auto &range = gstate.small_partitions[task.begin];
-			if (HasOnlyPoints(cursor, range.first, range.second)) {
-				ClusterPartition<PointItem>(gstate, lstate, range.first, range.second);
-			} else {
-				ClusterPartition<GeometryItem>(gstate, lstate, range.first, range.second);
-			}
-		} break;
-		case Stage::SCAN: {
-			if (gstate.has_non_points) {
-				// Another thread already found a geometry that is not a point
-				break;
-			}
-			const auto begin = gstate.large_partitions[gstate.large_partition_idx].first;
-			if (!HasOnlyPoints(cursor, begin + task.begin, begin + task.end)) {
-				gstate.has_non_points = true;
-			}
-		} break;
-		case Stage::DONE:
-			break;
-		default:
-			if (gstate.large_point_partition) {
-				ExecuteStage(gstate, lstate, *gstate.large_point_partition, task);
-			} else {
-				ExecuteStage(gstate, lstate, *gstate.large_geometry_partition, task);
-			}
-			break;
-		}
-	}
-
-	//------------------------------------------------------------------------------------------------------------------
-	// Window Function Callbacks
-	//------------------------------------------------------------------------------------------------------------------
-	static unique_ptr<FunctionData> Bind(BindWindowFunctionInput &input) {
-		// The parameters must be constant
-		const auto eps = input.GetNonNullConstant(1).GetValue<double>();
-		const auto min_points = input.GetNonNullConstant(2).GetValue<int64_t>();
-		if (std::isnan(eps) || eps < 0) {
-			throw BinderException("%s: eps must be a non-negative number, got %f", NAME, eps);
-		}
-		if (min_points < 0) {
-			throw BinderException("%s: minpoints must be a non-negative number, got %lld", NAME, min_points);
-		}
-		return make_uniq<BindData>(eps, UnsafeNumericCast<idx_t>(min_points));
-	}
-
-	static void GetSharing(WindowExecutor &executor, WindowSharedExpressions &shared) {
-		// Only materialize the geometries, the (constant) parameters are in the bind data
-		const auto &wexpr = executor.wexpr;
-		executor.child_idx.emplace_back(shared.RegisterCollection(wexpr.GetChildren()[0], false));
-	}
-
-	static unique_ptr<GlobalSinkState> GetGlobal(ClientContext &client, const WindowExecutor &executor,
-	                                             const idx_t payload_count, const ValidityMask &partition_mask,
-	                                             const ValidityMask &order_mask) {
-		return make_uniq<GlobalState>(client, executor, payload_count, partition_mask, order_mask);
-	}
-
-	static unique_ptr<LocalSinkState> GetLocal(ExecutionContext &context, const GlobalSinkState &gstate) {
-		return make_uniq<LocalState>(context, gstate.Cast<GlobalState>());
-	}
-
-	static void Finalize(ExecutionContext &context, optional_ptr<WindowCollection> collection,
-	                     OperatorSinkInput &sink) {
-		auto &gstate = sink.global_state.Cast<GlobalState>();
-		auto &lstate = sink.local_state.Cast<LocalState>();
-
-		D_ASSERT(collection);
-		lstate.cursor = make_uniq<WindowCursor>(*collection, gstate.geom_idx);
-
-		// Every thread of the hash group calls this, and none may return before all the clustering is done
-		try {
-			Task task;
-			while (gstate.stage.load() != Stage::DONE) {
-				if (!gstate.TryGetTask(task)) {
-					std::this_thread::yield();
-					continue;
-				}
-				ExecuteTask(gstate, lstate, task);
-				++gstate.completed_tasks;
-			}
-		} catch (...) {
-			// Make sure the other threads stop waiting for us
-			gstate.Abort();
-			throw;
-		}
-
-		// Unpin the collection
-		lstate.cursor.reset();
-	}
-
-	static void Evaluate(ExecutionContext &context, DataChunk &eval_chunk, DataChunk &bounds, Vector &result,
-	                     idx_t row_idx, OperatorSinkInput &sink) {
-		auto &gstate = sink.global_state.Cast<GlobalState>();
-		const auto count = eval_chunk.size();
-
-		auto writer = FlatVector::Writer<int64_t>(result, count);
-		for (idx_t i = 0; i < count; i++) {
-			const auto label = gstate.labels[row_idx + i];
-			if (label == DConstants::INVALID_INDEX) {
-				writer.WriteNull();
-			} else {
-				writer.WriteValue(UnsafeNumericCast<int64_t>(label));
-			}
-		}
-	}
 
 	//------------------------------------------------------------------------------------------------------------------
 	// Documentation
@@ -945,18 +1053,12 @@ struct ST_ClusterDBSCAN {
 	// Register
 	//------------------------------------------------------------------------------------------------------------------
 	static void Register(ExtensionLoader &loader) {
-		WindowFunction function(NAME, {}, LogicalType::BIGINT, ExpressionType::WINDOW_FUNCTION, Bind, nullptr,
-		                        GetSharing, GetGlobal, GetLocal, nullptr, Finalize, Evaluate);
-
+		auto function = ClusteringWindowFunction<ST_ClusterDBSCAN>::GetFunction();
 		function.GetSignature()
-            .AddParameter("geom", LogicalType::GEOMETRY())
-            .AddParameter("eps", LogicalType::DOUBLE)
-            .AddParameter("minpoints", LogicalType::INTEGER)
-            .SetReturnType(LogicalType::BIGINT);
-    
-		function.SetCanOrderBy(false);
-		function.SetCanIgnoreNulls(false);
-		function.SetFallible();
+		    .AddParameter("geom", LogicalType::GEOMETRY())
+		    .AddParameter("eps", LogicalType::DOUBLE)
+		    .AddParameter("minpoints", LogicalType::INTEGER)
+		    .SetReturnType(LogicalType::BIGINT);
 
 		CreateWindowFunctionInfo info(std::move(function));
 
@@ -980,7 +1082,579 @@ struct ST_ClusterDBSCAN {
 		}
 		auto &func_entry = entry->Cast<FunctionEntry>();
 		func_entry.tags.insert("ext", "spatial");
-		func_entry.tags.insert("category", "relation");
+		func_entry.tags.insert("category", "cluster");
+	}
+};
+
+//======================================================================================================================
+// ST_ClusterKMeans
+//======================================================================================================================
+// K-means over each window partition, with Lloyd's algorithm and k-means++ initialization:
+//  - Each geometry is reduced to a weighted point: points are weighted by their M value (if any), and other geometries
+//    are represented by their centroid.
+//  - The initial cluster centers are chosen with k-means++, one at a time: each is a pseudo-random point, picked with a
+//    probability proportional to its weight times its squared distance to the nearest center chosen so far.
+//  - Then the points are assigned to their nearest center, and the centers are moved to the (weighted) mean of their
+//    points, until no point changes its cluster anymore.
+//
+// The pseudo-random choices use a fixed seed, and all the sums are computed in the same order, regardless of how the
+// tasks are scheduled. So the result is deterministic for a given partition order. Clusters are numbered in the order
+// of their first point.
+
+struct ST_ClusterKMeans {
+
+	static constexpr auto NAME = "ST_ClusterKMeans";
+
+	//! The number of rows per task when loading a large partition and choosing its initial centers
+	static constexpr idx_t MORSEL_SIZE = STANDARD_VECTOR_SIZE;
+	//! The minimum number of rows per cluster in a task that assigns the points to their nearest center. This keeps the
+	//! memory for the partial sums of the clusters (per task) in proportion to the number of rows.
+	static constexpr idx_t ASSIGN_ROWS_PER_CLUSTER = 64;
+	//! The maximum number of iterations of assigning the points and moving the centers
+	static constexpr idx_t MAX_ITERATIONS = 1000;
+	//! The seed for choosing the initial centers
+	static constexpr int64_t SEED = 42;
+
+	//------------------------------------------------------------------------------------------------------------------
+	// Bind Data
+	//------------------------------------------------------------------------------------------------------------------
+	// There is no serialization for this, which is fine: the function is just bound again when deserializing.
+	class BindData final : public FunctionData {
+	public:
+		explicit BindData(const idx_t cluster_count_p) : cluster_count(cluster_count_p) {
+		}
+
+		unique_ptr<FunctionData> Copy() const override {
+			return make_uniq<BindData>(cluster_count);
+		}
+
+		bool Equals(const FunctionData &other_p) const override {
+			return cluster_count == other_p.Cast<BindData>().cluster_count;
+		}
+
+		//! The number of clusters
+		const idx_t cluster_count;
+	};
+
+	static unique_ptr<FunctionData> Bind(BindWindowFunctionInput &input) {
+		// The parameters must be constant
+		const auto cluster_count = input.GetNonNullConstant(1).GetValue<int64_t>();
+		if (cluster_count < 1) {
+			throw BinderException("%s: number_of_clusters must be larger than 0, got %lld", NAME, cluster_count);
+		}
+		return make_uniq<BindData>(UnsafeNumericCast<idx_t>(cluster_count));
+	}
+
+	//------------------------------------------------------------------------------------------------------------------
+	// Thread State
+	//------------------------------------------------------------------------------------------------------------------
+	struct ThreadState {
+		//! Scratch memory for deserializing geometries
+		unique_ptr<ArenaAllocator> arena;
+	};
+
+	using Context = ClusteringContext<BindData, ThreadState>;
+
+	//------------------------------------------------------------------------------------------------------------------
+	// Points
+	//------------------------------------------------------------------------------------------------------------------
+	//! A weighted point to cluster. The weight is 0 if the row is not clustered (because it is NULL or empty).
+	struct Point {
+		double x;
+		double y;
+		double w;
+	};
+
+	//! A cluster center
+	struct Center {
+		double x;
+		double y;
+	};
+
+	//! The (weighted) sum of the points in a cluster
+	struct Sum {
+		double x;
+		double y;
+		double w;
+	};
+
+	static double GetSquaredDistance(const Point &point, const Center &center) {
+		const auto dx = point.x - center.x;
+		const auto dy = point.y - center.y;
+		return dx * dx + dy * dy;
+	}
+
+	//! Load the point to cluster for a geometry: the point itself (weighted by its M value, if any), or the centroid of
+	//! other geometries. Returns false if the geometry is empty, or has non-finite coordinates.
+	static bool TryLoadPoint(const string_t &blob, ArenaAllocator &arena, Point &point) {
+		arena.Reset();
+		sgl::geometry geom;
+		Serde::Deserialize(geom, arena, blob.GetData(), blob.GetSize());
+
+		if (geom.get_type() == sgl::geometry_type::POINT) {
+			if (geom.is_empty()) {
+				return false;
+			}
+			const auto vertex = geom.get_vertex_xy(0);
+			point = {vertex.x, vertex.y, 1.0};
+			if (geom.has_m()) {
+				// The M value comes after the X, Y and (optional) Z values
+				memcpy(&point.w, geom.get_vertex_array() + (geom.has_z() ? 3 : 2) * sizeof(double), sizeof(double));
+				if (!(point.w > 0)) {
+					throw InvalidInputException("%s: the M value of a point is its weight, and must be larger than 0, "
+					                            "got %f",
+					                            NAME, point.w);
+				}
+			}
+		} else {
+			sgl::vertex_xyzm centroid = {0, 0, 0, 0};
+			if (!sgl::ops::get_centroid(geom, centroid)) {
+				return false;
+			}
+			point = {centroid.x, centroid.y, 1.0};
+		}
+		return std::isfinite(point.x) && std::isfinite(point.y) && std::isfinite(point.w);
+	}
+
+	//------------------------------------------------------------------------------------------------------------------
+	// Partition
+	//------------------------------------------------------------------------------------------------------------------
+	//! A partition, clustered in stages. Large partitions are clustered by all threads together, while small partitions
+	//! are clustered by running all the stages on a single thread.
+	class StagedPartition {
+	public:
+		StagedPartition(Allocator &allocator_p, const BindData &bind_data, const idx_t begin_p, const idx_t end_p,
+		                const idx_t /* thread_count */)
+		    : allocator(allocator_p), begin(begin_p), end(end_p), max_clusters(bind_data.cluster_count),
+		      points(end_p - begin_p, allocator_p), clusters(end_p - begin_p, allocator_p), centers(allocator_p),
+		      distances(allocator_p), rng(SEED), sums(allocator_p), totals(allocator_p) {
+			D_ASSERT(begin < end);
+
+			load_morsel_count = (Count() + MORSEL_SIZE - 1) / MORSEL_SIZE;
+			morsel_counts.resize(load_morsel_count);
+			morsel_masses.resize(load_morsel_count);
+		}
+
+		//! The number of rows in the partition
+		idx_t Count() const {
+			return end - begin;
+		}
+
+		bool NextStage(idx_t &task_count) {
+			switch (stage) {
+			case Stage::INIT:
+				stage = Stage::LOAD;
+				task_count = load_morsel_count;
+				return true;
+			case Stage::LOAD: {
+				// There can not be more clusters than points
+				idx_t point_count = 0;
+				for (const auto count : morsel_counts) {
+					point_count += count;
+				}
+				if (point_count == 0) {
+					// Nothing to cluster, all rows are NULL (or empty)
+					stage = Stage::DONE;
+					return false;
+				}
+				max_clusters = MinValue(max_clusters, point_count);
+				centers.reserve(max_clusters);
+				if (max_clusters > 1) {
+					distances.resize(Count());
+				}
+				// Pick the first center (with the masses being the weights of the points)
+				stage = Stage::PICK;
+				task_count = 1;
+				return true;
+			}
+			case Stage::PICK:
+				if (centers.size() < max_clusters) {
+					stage = Stage::DISTANCES;
+					task_count = load_morsel_count;
+					return true;
+				}
+				// All the initial centers have been chosen, so the distances are no longer needed
+				distances = TrackedVector<double>(allocator);
+				StartAssigning();
+				task_count = assign_morsel_count;
+				return true;
+			case Stage::DISTANCES:
+				stage = Stage::PICK;
+				task_count = 1;
+				return true;
+			case Stage::ASSIGN:
+				stage = Stage::UPDATE;
+				task_count = 1;
+				return true;
+			case Stage::UPDATE:
+				if (has_changes && iteration < MAX_ITERATIONS) {
+					stage = Stage::ASSIGN;
+					task_count = assign_morsel_count;
+					return true;
+				}
+				stage = Stage::LABEL;
+				task_count = 1;
+				return true;
+			case Stage::LABEL:
+			case Stage::DONE:
+				stage = Stage::DONE;
+				return false;
+			}
+			return false;
+		}
+
+		void ExecuteTask(Context &context, const idx_t task_idx) {
+			switch (stage) {
+			case Stage::LOAD:
+				Load(context, task_idx);
+				break;
+			case Stage::PICK:
+				Pick();
+				break;
+			case Stage::DISTANCES:
+				UpdateDistances(task_idx);
+				break;
+			case Stage::ASSIGN:
+				Assign(task_idx);
+				break;
+			case Stage::UPDATE:
+				Update();
+				break;
+			case Stage::LABEL:
+				Label(context.labels);
+				break;
+			default:
+				throw InternalException("%s: unexpected stage %s", NAME, GetStageName());
+			}
+		}
+
+		const char *GetStageName() const {
+			static constexpr const char *STAGE_NAMES[] = {"INIT",   "LOAD",   "PICK",  "DISTANCES",
+			                                              "ASSIGN", "UPDATE", "LABEL", "DONE"};
+			return STAGE_NAMES[static_cast<uint8_t>(stage)];
+		}
+
+	private:
+		enum class Stage : uint8_t { INIT, LOAD, PICK, DISTANCES, ASSIGN, UPDATE, LABEL, DONE };
+
+		//! Load the points of a morsel
+		void Load(Context &context, const idx_t morsel_idx) {
+			auto &arena = context.thread_state.arena;
+			if (!arena) {
+				arena = make_uniq<ArenaAllocator>(context.allocator);
+			}
+
+			const auto beg_idx = morsel_idx * MORSEL_SIZE;
+			const auto end_idx = MinValue(beg_idx + MORSEL_SIZE, Count());
+
+			idx_t count = 0;
+			double mass = 0;
+			context.ScanGeometries(begin + beg_idx, begin + end_idx, [&](const idx_t row, const string_t *blob) {
+				const auto i = row - begin;
+				auto &point = points[i];
+				if (!blob || !TryLoadPoint(*blob, *arena, point)) {
+					point = {0, 0, 0};
+				}
+				clusters[i] = DConstants::INVALID_INDEX;
+				if (point.w > 0) {
+					count++;
+					mass += point.w;
+				}
+				return true;
+			});
+			morsel_counts[morsel_idx] = count;
+			morsel_masses[morsel_idx] = mass;
+		}
+
+		//! The mass of a point when choosing the next initial center
+		double GetMass(const idx_t i) const {
+			return centers.size() == 0 ? points[i].w : points[i].w * distances[i];
+		}
+
+		//! Choose the next initial center
+		void Pick() {
+			double total = 0;
+			for (const auto mass : morsel_masses) {
+				total += mass;
+			}
+			if (!(total > 0)) {
+				// All the points coincide with the chosen centers, so there are no more distinct centers to choose
+				max_clusters = centers.size();
+				return;
+			}
+
+			// Find the morsel of the point to pick, and then the point within it
+			const auto target = rng.NextRandom() * total;
+			double cumulative = 0;
+			auto morsel_idx = DConstants::INVALID_INDEX;
+			auto reached = false;
+			for (idx_t m = 0; m < load_morsel_count; m++) {
+				if (!(morsel_masses[m] > 0)) {
+					continue;
+				}
+				morsel_idx = m;
+				if (cumulative + morsel_masses[m] > target) {
+					reached = true;
+					break;
+				}
+				cumulative += morsel_masses[m];
+			}
+			D_ASSERT(morsel_idx != DConstants::INVALID_INDEX);
+			if (!reached) {
+				// The target was not reached (due to rounding), so pick from the last morsel with any mass
+				cumulative -= morsel_masses[morsel_idx];
+			}
+
+			const auto beg_idx = morsel_idx * MORSEL_SIZE;
+			const auto end_idx = MinValue(beg_idx + MORSEL_SIZE, Count());
+			auto picked = DConstants::INVALID_INDEX;
+			for (idx_t i = beg_idx; i < end_idx; i++) {
+				const auto mass = GetMass(i);
+				if (!(mass > 0)) {
+					continue;
+				}
+				picked = i;
+				cumulative += mass;
+				if (cumulative > target) {
+					break;
+				}
+			}
+			D_ASSERT(picked != DConstants::INVALID_INDEX);
+
+			centers.push_back({points[picked].x, points[picked].y});
+		}
+
+		//! Update the squared distances of the points in a morsel to their nearest center, with the latest center
+		void UpdateDistances(const idx_t morsel_idx) {
+			const auto beg_idx = morsel_idx * MORSEL_SIZE;
+			const auto end_idx = MinValue(beg_idx + MORSEL_SIZE, Count());
+			const auto &center = centers[centers.size() - 1];
+
+			double mass = 0;
+			for (idx_t i = beg_idx; i < end_idx; i++) {
+				const auto &point = points[i];
+				if (!(point.w > 0)) {
+					continue;
+				}
+				const auto distance = GetSquaredDistance(point, center);
+				distances[i] = centers.size() == 1 ? distance : MinValue(distances[i], distance);
+				mass += point.w * distances[i];
+			}
+			morsel_masses[morsel_idx] = mass;
+		}
+
+		void StartAssigning() {
+			// Bound the number of tasks by the number of clusters, so the partial sums are bounded by the row count
+			assign_morsel_size = MaxValue(MORSEL_SIZE, centers.size() * ASSIGN_ROWS_PER_CLUSTER);
+			assign_morsel_count = (Count() + assign_morsel_size - 1) / assign_morsel_size;
+			sums.resize(assign_morsel_count * centers.size());
+			totals.resize(centers.size());
+			morsel_changes.resize(assign_morsel_count);
+			stage = Stage::ASSIGN;
+		}
+
+		//! Assign the points of a morsel to their nearest center, and sum up the points of each cluster
+		void Assign(const idx_t morsel_idx) {
+			const auto beg_idx = morsel_idx * assign_morsel_size;
+			const auto end_idx = MinValue(beg_idx + assign_morsel_size, Count());
+			const auto morsel_sums = sums.data() + morsel_idx * centers.size();
+			std::fill_n(morsel_sums, centers.size(), Sum {0, 0, 0});
+
+			idx_t changes = 0;
+			for (idx_t i = beg_idx; i < end_idx; i++) {
+				const auto &point = points[i];
+				if (!(point.w > 0)) {
+					continue;
+				}
+
+				// Find the nearest center (the first one, on ties)
+				idx_t nearest = 0;
+				auto nearest_distance = GetSquaredDistance(point, centers[0]);
+				for (idx_t c = 1; c < centers.size(); c++) {
+					const auto distance = GetSquaredDistance(point, centers[c]);
+					if (distance < nearest_distance) {
+						nearest = c;
+						nearest_distance = distance;
+					}
+				}
+
+				if (clusters[i] != nearest) {
+					clusters[i] = nearest;
+					changes++;
+				}
+
+				auto &sum = morsel_sums[nearest];
+				sum.x += point.w * point.x;
+				sum.y += point.w * point.y;
+				sum.w += point.w;
+			}
+			morsel_changes[morsel_idx] = changes;
+		}
+
+		//! Move the centers to the (weighted) mean of their points
+		void Update() {
+			// Add up the partial sums in morsel order, so the result does not depend on the task scheduling
+			std::fill(totals.begin(), totals.end(), Sum {0, 0, 0});
+			for (idx_t m = 0; m < assign_morsel_count; m++) {
+				const auto morsel_sums = sums.data() + m * centers.size();
+				for (idx_t c = 0; c < centers.size(); c++) {
+					totals[c].x += morsel_sums[c].x;
+					totals[c].y += morsel_sums[c].y;
+					totals[c].w += morsel_sums[c].w;
+				}
+			}
+			for (idx_t c = 0; c < centers.size(); c++) {
+				// Clusters without any points keep their center
+				if (totals[c].w > 0) {
+					centers[c] = {totals[c].x / totals[c].w, totals[c].y / totals[c].w};
+				}
+			}
+
+			has_changes = false;
+			for (const auto changes : morsel_changes) {
+				has_changes = has_changes || changes > 0;
+			}
+			iteration++;
+		}
+
+		//! Assign the cluster labels of the partition rows (in the labels of the whole hash group), numbering the
+		//! clusters in the order of their first point
+		void Label(idx_t *hash_group_labels) {
+			const auto labels = hash_group_labels + begin;
+
+			// Reuse the partial sums for the cluster numbers
+			auto numbers = reinterpret_cast<idx_t *>(totals.data());
+			static_assert(sizeof(Sum) >= sizeof(idx_t), "the cluster numbers must fit in the partial sums");
+			std::fill_n(numbers, centers.size(), DConstants::INVALID_INDEX);
+
+			idx_t next_number = 0;
+			for (idx_t i = 0; i < Count(); i++) {
+				const auto cluster = clusters[i];
+				if (cluster == DConstants::INVALID_INDEX) {
+					continue;
+				}
+				if (numbers[cluster] == DConstants::INVALID_INDEX) {
+					numbers[cluster] = next_number++;
+				}
+				labels[i] = numbers[cluster];
+			}
+		}
+
+	private:
+		Allocator &allocator;
+
+		//! The rows of the partition within the hash group
+		const idx_t begin;
+		const idx_t end;
+
+		//! The number of clusters to choose initial centers for, which is reduced if there are not enough (distinct) points
+		idx_t max_clusters;
+
+		Stage stage = Stage::INIT;
+
+		//! The point of each row
+		TrackedVector<Point> points;
+		//! The cluster (center) of each row, or INVALID_INDEX if it is not clustered
+		TrackedVector<idx_t> clusters;
+
+		//! The number of points, and their mass, per (load) morsel
+		idx_t load_morsel_count;
+		vector<idx_t> morsel_counts;
+		vector<double> morsel_masses;
+
+		//! The cluster centers (as many as have been chosen so far)
+		TrackedVector<Center> centers;
+
+		//! The squared distance of each row to its nearest center, while choosing the initial centers
+		TrackedVector<double> distances;
+		//! Picks the initial centers
+		RandomEngine rng;
+
+		//! The partial sums of the clusters, per (assign) morsel, and their totals
+		idx_t assign_morsel_size = 0;
+		idx_t assign_morsel_count = 0;
+		TrackedVector<Sum> sums;
+		TrackedVector<Sum> totals;
+		//! The number of points that changed their cluster, per (assign) morsel
+		vector<idx_t> morsel_changes;
+		bool has_changes = true;
+		idx_t iteration = 0;
+	};
+
+	//! Cluster a whole (small) partition on the current thread, by running all its stages
+	static void ClusterPartition(Context &context, const idx_t begin, const idx_t end) {
+		StagedPartition partition(context.allocator, context.bind_data, begin, end, 1);
+		idx_t task_count = 0;
+		while (partition.NextStage(task_count)) {
+			for (idx_t task_idx = 0; task_idx < task_count; task_idx++) {
+				partition.ExecuteTask(context, task_idx);
+			}
+		}
+	}
+
+	//------------------------------------------------------------------------------------------------------------------
+	// Documentation
+	//------------------------------------------------------------------------------------------------------------------
+	static constexpr auto DOC_DESCRIPTION = R"(
+		Window function that returns a cluster id for each input geometry, using the K-means algorithm to divide the geometries of the partition into `number_of_clusters` clusters.
+
+		The geometries are clustered by their centroid. The M value of a point (if any) is used as its weight, and must be larger than 0.
+
+		Clusters are numbered from 0 within each partition, in the order of their first geometry. There can be fewer clusters than requested, if there are fewer distinct geometries. `NULL` and empty geometries are assigned `NULL`.
+
+		The initial cluster centers are chosen with k-means++, which is pseudo-random but uses a fixed seed, so the result is deterministic for a given row order (e.g. when using `ORDER BY` in the `OVER` clause).
+
+		Distances are planar, in the units of the input coordinates. `number_of_clusters` must be constant. The window frame is ignored, all geometries in the partition are clustered.
+	)";
+
+	static constexpr auto DOC_EXAMPLE = R"(
+		SELECT id, ST_ClusterKMeans(geom, 2) OVER () AS cluster
+		FROM (VALUES
+			(1, ST_Point(0, 0)),
+			(2, ST_Point(1, 0)),
+			(3, ST_Point(10, 10)),
+			(4, ST_Point(11, 10))
+		) AS t(id, geom)
+		ORDER BY id;
+		-- 1	0
+		-- 2	0
+		-- 3	1
+		-- 4	1
+	)";
+
+	//------------------------------------------------------------------------------------------------------------------
+	// Register
+	//------------------------------------------------------------------------------------------------------------------
+	static void Register(ExtensionLoader &loader) {
+		auto function = ClusteringWindowFunction<ST_ClusterKMeans>::GetFunction();
+		function.GetSignature()
+		    .AddParameter("geom", LogicalType::GEOMETRY())
+		    .AddParameter("number_of_clusters", LogicalType::INTEGER)
+		    .SetReturnType(LogicalType::BIGINT);
+
+		CreateWindowFunctionInfo info(std::move(function));
+
+		FunctionDescription description;
+		description.parameter_names = {"geom", "number_of_clusters"};
+		description.parameter_types = {LogicalType::GEOMETRY(), LogicalType::INTEGER};
+		description.description = FunctionBuilder::RemoveIndentAndTrailingWhitespace(DOC_DESCRIPTION);
+		description.examples.push_back(FunctionBuilder::RemoveIndentAndTrailingWhitespace(DOC_EXAMPLE));
+		info.descriptions.push_back(std::move(description));
+
+		loader.RegisterFunction(std::move(info));
+
+		// The tags are not copied from the create info, so set them on the catalog entry instead
+		auto &db = loader.GetDatabaseInstance();
+		auto &catalog = Catalog::GetSystemCatalog(db);
+		auto transaction = CatalogTransaction::GetSystemTransaction(db);
+		auto &schema = catalog.GetSchema(transaction, Identifier::DefaultSchema());
+		auto entry = schema.GetEntry(transaction, CatalogType::WINDOW_FUNCTION_ENTRY, Identifier(NAME));
+		if (!entry) {
+			throw InternalException("Window function \"%s\" not found after registering it", NAME);
+		}
+		auto &func_entry = entry->Cast<FunctionEntry>();
+		func_entry.tags.insert("ext", "spatial");
+		func_entry.tags.insert("category", "cluster");
 	}
 };
 
@@ -991,6 +1665,7 @@ struct ST_ClusterDBSCAN {
 //======================================================================================================================
 void RegisterSpatialWindowFunctions(ExtensionLoader &loader) {
 	ST_ClusterDBSCAN::Register(loader);
+	ST_ClusterKMeans::Register(loader);
 }
 
 } // namespace duckdb
