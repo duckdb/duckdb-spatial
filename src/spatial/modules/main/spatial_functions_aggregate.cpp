@@ -44,9 +44,10 @@ struct ExtentAggFunction {
 	template <class INPUT_TYPE, class STATE, class OP>
 	static void Operation(STATE &state, const INPUT_TYPE &input, AggregateUnaryInput &aggregate) {
 
-		// TODO: Vectorize this so we dont clear the arena after each row
+		// The input allocator is shared with other aggregates, so it must not be reset here
+		ArenaAllocator arena(Allocator::DefaultAllocator());
 		sgl::geometry geom;
-		Serde::Deserialize(geom, aggregate.input.allocator, input.GetDataUnsafe(), input.GetSize());
+		Serde::Deserialize(geom, arena, input.GetDataUnsafe(), input.GetSize());
 
 		auto bbox = sgl::extent_xy::smallest();
 		if (sgl::ops::get_total_extent_xy(geom, bbox)) {
@@ -64,8 +65,6 @@ struct ExtentAggFunction {
 				state.ymax = std::max(state.ymax, bbox.max.y);
 			}
 		}
-
-		aggregate.input.allocator.Reset();
 	}
 
 	template <class INPUT_TYPE, class STATE, class OP>

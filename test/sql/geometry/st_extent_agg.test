@@ -1,0 +1,17 @@
+# name: test/sql/geometry/st_extent_agg.test
+# group: [geometry]
+
+require spatial
+
+# ST_Extent_Agg must not clobber the state of other aggregates sharing its allocator
+query II
+SELECT ST_XMin(ST_Extent_Agg(g)), quantile_cont(ST_X(g), 0.05)
+FROM (SELECT ST_Point(i % 1000, i % 1000) AS g FROM range(100000) t(i));
+----
+0.0	49.95
+
+query II
+SELECT ST_XMax(ST_Extent_Agg(g)), median(ST_X(g))
+FROM (SELECT ST_Point(i % 1000, i % 1000) AS g FROM range(100000) t(i));
+----
+999.0	499.5
