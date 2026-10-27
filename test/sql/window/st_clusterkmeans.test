@@ -199,7 +199,7 @@ must not be NULL
 statement error
 SELECT ST_ClusterKMeans(geom, 0) OVER () FROM points;
 ----
-number_of_clusters must be larger than 0
+k must be larger than 0
 
 statement error
 SELECT ST_ClusterKMeans(geom, 2 ORDER BY id) OVER () FROM points;

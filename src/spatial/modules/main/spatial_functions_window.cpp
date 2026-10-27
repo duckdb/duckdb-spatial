@@ -40,17 +40,17 @@ namespace {
 // A hash group (which can contain many partitions) is clustered in the window FINALIZE stage. Every thread of the hash
 // group calls it, and none of them may return before the whole hash group has been clustered:
 //  - The geometries are materialized into the (buffer-managed) window collection, and are read from there.
-//  - Small partitions are clustered by a single thread each. Large partitions are clustered by all threads together,
-//    one partition at a time, in stages that are defined by the clustering algorithm.
+//  - Partitions are clustered in stages that are defined by the clustering algorithm. Small partitions are clustered by
+//    a single thread each, which runs all the stages. Large partitions are clustered by all threads together, one
+//    partition at a time, with the tasks of each stage executed concurrently.
 //  - All memory used to cluster a partition is released as soon as its rows have been labeled, so that only the
 //    labels (one per row) are kept until the results have been emitted.
 //
 // A clustering ALGORITHM provides:
 //  - `NAME`, the `BindData` with the (constant) clustering parameters, and `Bind()`.
 //  - The `ThreadState` that its tasks need for each thread.
-//  - `ClusterPartition(context, begin, end)`, which clusters a small partition on the current thread.
-//  - The `StagedPartition`, which clusters a large partition in stages, with:
-//    - `StagedPartition(allocator, bind_data, begin, end, thread_count)`
+//  - The `StagedPartition`, which clusters a partition in stages, with:
+//    - `StagedPartition(allocator, bind_data, begin, end)`
 //    - `bool NextStage(idx_t &task_count)`, which moves on to the next stage, and returns false once the partition has
 //      been labeled. This is called by a single thread, once all the tasks of the previous stage have been executed.
 //    - `void ExecuteTask(context, task_idx)`, which executes a task of the current stage (concurrently).
@@ -73,8 +73,9 @@ struct ClusteringContext {
 	idx_t *labels;
 	//! Reads the geometries of the hash group
 	WindowCursor &cursor;
-	//! The thread executing the task
-	idx_t thread_idx;
+	//! Memory of the thread executing the task, which is released once the partition has been clustered. Until then,
+	//! anything allocated in it can be used by all threads.
+	ArenaAllocator &arena;
 	//! The algorithm specific state of the thread
 	THREAD_STATE &thread_state;
 
@@ -197,14 +198,16 @@ struct ClusteringWindowFunction {
 				}
 				// Done with this large partition, release its memory
 				large_partition.reset();
+				for (auto &arena : arenas) {
+					arena.get().FreeAll();
+				}
 				large_partition_idx++;
 			}
 
 			// Start clustering the next large partition (if any)
 			for (; large_partition_idx < large_partitions.size(); large_partition_idx++) {
 				const auto &range = large_partitions[large_partition_idx];
-				large_partition =
-				    make_uniq<StagedPartition>(allocator, bind_data, range.first, range.second, thread_count.load());
+				large_partition = make_uniq<StagedPartition>(allocator, bind_data, range.first, range.second);
 				if (large_partition->NextStage(task_count)) {
 					stage = Stage::LARGE;
 					total_tasks = task_count;
@@ -232,8 +235,9 @@ struct ClusteringWindowFunction {
 		TrackedVector<pair<idx_t, idx_t>> small_partitions;
 		vector<pair<idx_t, idx_t>> large_partitions;
 
-		//! The number of threads working on this hash group (one per local state)
-		mutable atomic<idx_t> thread_count {0};
+		//! The arenas of the threads working on this hash group (one per local state)
+		mutable vector<reference<ArenaAllocator>> arenas;
+		mutable mutex arenas_lock;
 
 		//! The current processing stage
 		atomic<Stage> stage {Stage::DONE};
@@ -260,25 +264,38 @@ struct ClusteringWindowFunction {
 	class LocalState final : public WindowExecutorLocalState {
 	public:
 		LocalState(ExecutionContext &context, const GlobalState &gstate)
-		    : WindowExecutorLocalState(context, gstate), thread_idx(gstate.thread_count++) {
+		    : WindowExecutorLocalState(context, gstate), arena(BufferAllocator::Get(context.client)) {
+			lock_guard<mutex> guard(gstate.arenas_lock);
+			gstate.arenas.push_back(arena);
 		}
 
-		//! The index of this thread within the hash group
-		const idx_t thread_idx;
 		//! Reads the geometries from the window collection
 		unique_ptr<WindowCursor> cursor;
+		//! The memory of this thread for clustering a partition
+		ArenaAllocator arena;
 		//! The algorithm specific state of this thread
 		ThreadState thread_state;
 	};
 
 	static void ExecuteTask(GlobalState &gstate, LocalState &lstate, const Task &task) {
-		Context context {gstate.allocator, gstate.bind_data,  gstate.labels.data(),
-		                 *lstate.cursor,   lstate.thread_idx, lstate.thread_state};
+		Context context {gstate.allocator, gstate.bind_data, gstate.labels.data(),
+		                 *lstate.cursor,   lstate.arena,      lstate.thread_state};
 
 		switch (task.stage) {
 		case Stage::SMALL: {
+			// Cluster the whole partition on this thread, by running all of its stages
 			const auto &range = gstate.small_partitions[task.index];
-			ALGORITHM::ClusterPartition(context, range.first, range.second);
+			{
+				StagedPartition partition(gstate.allocator, gstate.bind_data, range.first, range.second);
+				idx_t task_count = 0;
+				while (partition.NextStage(task_count)) {
+					for (idx_t task_idx = 0; task_idx < task_count; task_idx++) {
+						partition.ExecuteTask(context, task_idx);
+					}
+				}
+			}
+			// Release the memory of the partition
+			lstate.arena.FreeAll();
 		} break;
 		case Stage::LARGE:
 			gstate.large_partition->ExecuteTask(context, task.index);
@@ -319,6 +336,10 @@ struct ClusteringWindowFunction {
 		try {
 			Task task;
 			while (gstate.stage.load() != Stage::DONE) {
+				// The clustering can take a while, so check whether the query was interrupted between the tasks
+				if (context.client.IsInterrupted()) {
+					throw InterruptException();
+				}
 				if (!gstate.TryGetTask(task)) {
 					std::this_thread::yield();
 					continue;
@@ -372,7 +393,7 @@ struct ClusteringWindowFunction {
 // DBSCAN over each window partition, using an R-Tree for the neighbour searches and a concurrent union-find to merge
 // the core geometries into clusters:
 //  - Each partition is loaded into an in-memory R-Tree. Points are stored inline in the tree, other geometries are
-//    deserialized into arenas owned by the partition, with their polygon rings indexed to speed up the distance
+//    deserialized into the arenas of the loading threads, with their polygon rings indexed to speed up the distance
 //    computations. Partitions that only contain points (which is checked by first scanning the geometry headers) use
 //    a smaller, point-only item type.
 //  - The core geometries are found with a search for their neighbours, and then merged with their core neighbours,
@@ -385,7 +406,7 @@ struct ST_ClusterDBSCAN {
 
 	static constexpr auto NAME = "ST_ClusterDBSCAN";
 
-	//! The number of rows (or R-Tree leaves) per task when clustering a large partition
+	//! The number of rows (or R-Tree leaves) per task
 	static constexpr idx_t MORSEL_SIZE = STANDARD_VECTOR_SIZE;
 
 	using Box = Box2D<float>;
@@ -528,8 +549,7 @@ struct ST_ClusterDBSCAN {
 		}
 
 		//! Load a (point) geometry blob into an item and compute its R-Tree box
-		template <class GET_ARENA>
-		static void Load(const string_t &blob, GET_ARENA &&get_arena, PointItem &item, Box &box) {
+		static void Load(const string_t &blob, ArenaAllocator &, PointItem &item, Box &box) {
 			auto extent = GeometryExtent::Empty();
 			if (TryGetBox(blob, extent, box)) {
 				item = {extent.x_min, extent.y_min};
@@ -591,10 +611,8 @@ struct ST_ClusterDBSCAN {
 		}
 
 		//! Load a geometry blob into an item and compute its R-Tree box.
-		//! Non-point geometries are copied and deserialized into the arena of the loading thread, since the blob does
-		//! not outlive the scan.
-		template <class GET_ARENA>
-		static void Load(const string_t &blob, GET_ARENA &&get_arena, GeometryItem &item, Box &box) {
+		//! Non-point geometries are copied and deserialized into the arena, since the blob does not outlive the scan.
+		static void Load(const string_t &blob, ArenaAllocator &arena, GeometryItem &item, Box &box) {
 			auto extent = GeometryExtent::Empty();
 			if (!TryGetBox(blob, extent, box)) {
 				return;
@@ -606,7 +624,6 @@ struct ST_ClusterDBSCAN {
 				return;
 			}
 
-			ArenaAllocator &arena = get_arena();
 			const auto blob_size = blob.GetSize();
 			const auto blob_copy = arena.Allocate(blob_size);
 			memcpy(blob_copy, blob.GetData(), blob_size);
@@ -658,9 +675,9 @@ struct ST_ClusterDBSCAN {
 	template <class ITEM>
 	class Partition {
 	public:
-		Partition(Allocator &allocator_p, const idx_t begin_p, const idx_t end_p, const idx_t thread_count)
+		Partition(Allocator &allocator_p, const idx_t begin_p, const idx_t end_p)
 		    : allocator(allocator_p), begin(begin_p), end(end_p), tree(allocator_p, end_p - begin_p, ITEM::NODE_SIZE),
-		      parent(end_p - begin_p, allocator_p), core(end_p - begin_p, allocator_p), arenas(thread_count) {
+		      parent(end_p - begin_p, allocator_p), core(end_p - begin_p, allocator_p) {
 			D_ASSERT(begin < end);
 		}
 
@@ -669,17 +686,14 @@ struct ST_ClusterDBSCAN {
 			return end - begin;
 		}
 
-		//! Load the partition rows [beg_idx, end_idx) into the R-Tree, using the arena of the given thread (if needed)
-		void Load(Context &context, const idx_t beg_idx, const idx_t end_idx, const idx_t thread_idx) {
-			const auto get_arena = [&]() -> ArenaAllocator & {
-				return GetArena(thread_idx);
-			};
+		//! Load the partition rows [beg_idx, end_idx) into the R-Tree
+		void Load(Context &context, const idx_t beg_idx, const idx_t end_idx) {
 			context.ScanGeometries(begin + beg_idx, begin + end_idx, [&](const idx_t row, const string_t *blob) {
 				const auto i = row - begin;
 				auto item = ITEM::Invalid();
 				auto box = Box();
 				if (blob) {
-					ITEM::Load(*blob, get_arena, item, box);
+					ITEM::Load(*blob, context.arena, item, box);
 				}
 				tree.Set(i, box, item);
 				parent[i].store(i);
@@ -832,16 +846,6 @@ struct ST_ClusterDBSCAN {
 			}
 		}
 
-		//! Get the arena of a loading thread
-		ArenaAllocator &GetArena(const idx_t thread_idx) {
-			D_ASSERT(thread_idx < arenas.size());
-			auto &arena = arenas[thread_idx];
-			if (!arena) {
-				arena = make_uniq<ArenaAllocator>(allocator);
-			}
-			return *arena;
-		}
-
 	private:
 		Allocator &allocator;
 
@@ -858,42 +862,17 @@ struct ST_ClusterDBSCAN {
 
 		//! Whether a row is a core row (not a vector<bool>, since the rows are written concurrently)
 		TrackedVector<uint8_t> core;
-
-		//! The arenas holding deserialized geometries (if the items need them), one per loading thread
-		vector<unique_ptr<ArenaAllocator>> arenas;
 	};
 
 	//------------------------------------------------------------------------------------------------------------------
-	// Clustering
+	// Staged Partition
 	//------------------------------------------------------------------------------------------------------------------
-	//! Cluster a whole (small) partition on the current thread
-	static void ClusterPartition(Context &context, const idx_t begin, const idx_t end) {
-		if (HasOnlyPoints(context, begin, end)) {
-			ClusterPartition<PointItem>(context, begin, end);
-		} else {
-			ClusterPartition<GeometryItem>(context, begin, end);
-		}
-	}
-
-	template <class ITEM>
-	static void ClusterPartition(Context &context, const idx_t begin, const idx_t end) {
-		const Eps eps(context.bind_data.eps);
-		Partition<ITEM> partition(context.allocator, begin, end, 1);
-		const auto count = partition.Count();
-		partition.Load(context, 0, count, 0);
-		partition.Build();
-		partition.FindCore(eps, context.bind_data.min_points, context.thread_state.scan, 0, count);
-		partition.FindClusters(eps, context.thread_state.scan, 0, count);
-		partition.Label(context.labels);
-	}
-
-	//! A large partition, clustered by all threads together
+	//! A partition, clustered in stages. It is only known which kind of items to cluster after the SCAN stage, so this
+	//! then creates the partition with the right items, and executes the other stages on it.
 	class StagedPartition {
 	public:
-		StagedPartition(Allocator &allocator_p, const BindData &bind_data_p, const idx_t begin_p, const idx_t end_p,
-		                const idx_t thread_count_p)
-		    : allocator(allocator_p), bind_data(bind_data_p), eps(bind_data_p.eps), begin(begin_p), end(end_p),
-		      thread_count(thread_count_p) {
+		StagedPartition(Allocator &allocator_p, const BindData &bind_data_p, const idx_t begin_p, const idx_t end_p)
+		    : allocator(allocator_p), bind_data(bind_data_p), eps(bind_data_p.eps), begin(begin_p), end(end_p) {
 		}
 
 		bool NextStage(idx_t &task_count) {
@@ -905,9 +884,9 @@ struct ST_ClusterDBSCAN {
 				return true;
 			case Stage::SCAN:
 				if (has_non_points) {
-					geometry_partition = make_uniq<Partition<GeometryItem>>(allocator, begin, end, thread_count);
+					geometry_partition = make_uniq<Partition<GeometryItem>>(allocator, begin, end);
 				} else {
-					point_partition = make_uniq<Partition<PointItem>>(allocator, begin, end, thread_count);
+					point_partition = make_uniq<Partition<PointItem>>(allocator, begin, end);
 				}
 				stage = Stage::LOAD;
 				task_count = GetMorselCount();
@@ -971,7 +950,7 @@ struct ST_ClusterDBSCAN {
 		void ExecuteTask(Partition<ITEM> &partition, Context &context, const idx_t beg_idx, const idx_t end_idx) {
 			switch (stage) {
 			case Stage::LOAD:
-				partition.Load(context, beg_idx, end_idx, context.thread_idx);
+				partition.Load(context, beg_idx, end_idx);
 				break;
 			case Stage::BUILD:
 				partition.Build();
@@ -1002,8 +981,6 @@ struct ST_ClusterDBSCAN {
 		//! The rows of the partition within the hash group
 		const idx_t begin;
 		const idx_t end;
-		//! The number of threads working on the partition
-		const idx_t thread_count;
 
 		Stage stage = Stage::INIT;
 
@@ -1105,7 +1082,7 @@ struct ST_ClusterKMeans {
 
 	static constexpr auto NAME = "ST_ClusterKMeans";
 
-	//! The number of rows per task when loading a large partition and choosing its initial centers
+	//! The number of rows per task when loading the points and choosing the initial centers
 	static constexpr idx_t MORSEL_SIZE = STANDARD_VECTOR_SIZE;
 	//! The minimum number of rows per cluster in a task that assigns the points to their nearest center. This keeps the
 	//! memory for the partial sums of the clusters (per task) in proportion to the number of rows.
@@ -1140,7 +1117,7 @@ struct ST_ClusterKMeans {
 		// The parameters must be constant
 		const auto cluster_count = input.GetNonNullConstant(1).GetValue<int64_t>();
 		if (cluster_count < 1) {
-			throw BinderException("%s: number_of_clusters must be larger than 0, got %lld", NAME, cluster_count);
+			throw BinderException("%s: k must be larger than 0, got %lld", NAME, cluster_count);
 		}
 		return make_uniq<BindData>(UnsafeNumericCast<idx_t>(cluster_count));
 	}
@@ -1148,10 +1125,7 @@ struct ST_ClusterKMeans {
 	//------------------------------------------------------------------------------------------------------------------
 	// Thread State
 	//------------------------------------------------------------------------------------------------------------------
-	struct ThreadState {
-		//! Scratch memory for deserializing geometries
-		unique_ptr<ArenaAllocator> arena;
-	};
+	struct ThreadState {};
 
 	using Context = ClusteringContext<BindData, ThreadState>;
 
@@ -1187,6 +1161,7 @@ struct ST_ClusterKMeans {
 	//! Load the point to cluster for a geometry: the point itself (weighted by its M value, if any), or the centroid of
 	//! other geometries. Returns false if the geometry is empty, or has non-finite coordinates.
 	static bool TryLoadPoint(const string_t &blob, ArenaAllocator &arena, Point &point) {
+		// Nothing else is kept in the arena, so it can be reused for every geometry
 		arena.Reset();
 		sgl::geometry geom;
 		Serde::Deserialize(geom, arena, blob.GetData(), blob.GetSize());
@@ -1219,12 +1194,10 @@ struct ST_ClusterKMeans {
 	//------------------------------------------------------------------------------------------------------------------
 	// Partition
 	//------------------------------------------------------------------------------------------------------------------
-	//! A partition, clustered in stages. Large partitions are clustered by all threads together, while small partitions
-	//! are clustered by running all the stages on a single thread.
+	//! A partition, clustered in stages
 	class StagedPartition {
 	public:
-		StagedPartition(Allocator &allocator_p, const BindData &bind_data, const idx_t begin_p, const idx_t end_p,
-		                const idx_t /* thread_count */)
+		StagedPartition(Allocator &allocator_p, const BindData &bind_data, const idx_t begin_p, const idx_t end_p)
 		    : allocator(allocator_p), begin(begin_p), end(end_p), max_clusters(bind_data.cluster_count),
 		      points(end_p - begin_p, allocator_p), clusters(end_p - begin_p, allocator_p), centers(allocator_p),
 		      distances(allocator_p), rng(SEED), sums(allocator_p), totals(allocator_p) {
@@ -1339,11 +1312,6 @@ struct ST_ClusterKMeans {
 
 		//! Load the points of a morsel
 		void Load(Context &context, const idx_t morsel_idx) {
-			auto &arena = context.thread_state.arena;
-			if (!arena) {
-				arena = make_uniq<ArenaAllocator>(context.allocator);
-			}
-
 			const auto beg_idx = morsel_idx * MORSEL_SIZE;
 			const auto end_idx = MinValue(beg_idx + MORSEL_SIZE, Count());
 
@@ -1352,7 +1320,7 @@ struct ST_ClusterKMeans {
 			context.ScanGeometries(begin + beg_idx, begin + end_idx, [&](const idx_t row, const string_t *blob) {
 				const auto i = row - begin;
 				auto &point = points[i];
-				if (!blob || !TryLoadPoint(*blob, *arena, point)) {
+				if (!blob || !TryLoadPoint(*blob, context.arena, point)) {
 					point = {0, 0, 0};
 				}
 				clusters[i] = DConstants::INVALID_INDEX;
@@ -1581,22 +1549,11 @@ struct ST_ClusterKMeans {
 		idx_t iteration = 0;
 	};
 
-	//! Cluster a whole (small) partition on the current thread, by running all its stages
-	static void ClusterPartition(Context &context, const idx_t begin, const idx_t end) {
-		StagedPartition partition(context.allocator, context.bind_data, begin, end, 1);
-		idx_t task_count = 0;
-		while (partition.NextStage(task_count)) {
-			for (idx_t task_idx = 0; task_idx < task_count; task_idx++) {
-				partition.ExecuteTask(context, task_idx);
-			}
-		}
-	}
-
 	//------------------------------------------------------------------------------------------------------------------
 	// Documentation
 	//------------------------------------------------------------------------------------------------------------------
 	static constexpr auto DOC_DESCRIPTION = R"(
-		Window function that returns a cluster id for each input geometry, using the K-means algorithm to divide the geometries of the partition into `number_of_clusters` clusters.
+		Window function that returns a cluster id for each input geometry, using the K-means algorithm to divide the geometries of the partition into `k` clusters.
 
 		The geometries are clustered by their centroid. The M value of a point (if any) is used as its weight, and must be larger than 0.
 
@@ -1604,7 +1561,7 @@ struct ST_ClusterKMeans {
 
 		The initial cluster centers are chosen with k-means++, which is pseudo-random but uses a fixed seed, so the result is deterministic for a given row order (e.g. when using `ORDER BY` in the `OVER` clause).
 
-		Distances are planar, in the units of the input coordinates. `number_of_clusters` must be constant. The window frame is ignored, all geometries in the partition are clustered.
+		Distances are planar, in the units of the input coordinates. `k` must be constant. The window frame is ignored, all geometries in the partition are clustered.
 	)";
 
 	static constexpr auto DOC_EXAMPLE = R"(
@@ -1629,13 +1586,13 @@ struct ST_ClusterKMeans {
 		auto function = ClusteringWindowFunction<ST_ClusterKMeans>::GetFunction();
 		function.GetSignature()
 		    .AddParameter("geom", LogicalType::GEOMETRY())
-		    .AddParameter("number_of_clusters", LogicalType::INTEGER)
+		    .AddParameter("k", LogicalType::INTEGER)
 		    .SetReturnType(LogicalType::BIGINT);
 
 		CreateWindowFunctionInfo info(std::move(function));
 
 		FunctionDescription description;
-		description.parameter_names = {"geom", "number_of_clusters"};
+		description.parameter_names = {"geom", "k"};
 		description.parameter_types = {LogicalType::GEOMETRY(), LogicalType::INTEGER};
 		description.description = FunctionBuilder::RemoveIndentAndTrailingWhitespace(DOC_DESCRIPTION);
 		description.examples.push_back(FunctionBuilder::RemoveIndentAndTrailingWhitespace(DOC_EXAMPLE));
