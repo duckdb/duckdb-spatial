@@ -10,6 +10,7 @@ void RegisterSpatialScalarFunctions(ExtensionLoader &loader);
 void RegisterSpatialAggregateFunctions(ExtensionLoader &loader);
 void RegisterSpatialCastFunctions(ExtensionLoader &loader);
 void RegisterSpatialTableFunctions(ExtensionLoader &loader);
+void RegisterSpatialWindowFunctions(ExtensionLoader &loader);
 
 // TODO: Move these
 class Vector;
