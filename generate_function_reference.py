@@ -85,6 +85,7 @@ def main():
         print("Collecting functions")
 
         aggregate_functions = get_functions('aggregate')
+        window_functions = get_functions('window')
         scalar_functions = get_functions('scalar')
         table_functions = get_functions('table')
         macro_functions = get_functions('macro')
@@ -96,6 +97,9 @@ def main():
         f.write("\n")
         f.write("**[Aggregate Functions](#aggregate-functions)**\n\n")
         write_table_of_contents(f, aggregate_functions)
+        f.write("\n")
+        f.write("**[Window Functions](#window-functions)**\n\n")
+        write_table_of_contents(f, window_functions)
         f.write("\n")
         f.write("**[Macro Functions](#Macro-functions)**\n\n")
         write_table_of_contents(f, macro_functions)
@@ -109,6 +113,7 @@ def main():
         for func_set in [
             ("Scalar Functions", scalar_functions),
             ("Aggregate Functions", aggregate_functions),
+            ("Window Functions", window_functions),
             ("Macro Functions", macro_functions),
         ]:
             f.write(f"## {func_set[0]}\n\n")
