@@ -1,0 +1,88 @@
+# name: test/sql/geometry/st_asgrid.test
+# group: [geometry]
+
+require spatial
+
+# Test ST_AsGrid (With Global Origin)
+query IIIII
+WITH __input AS (
+	SELECT
+        iso3,
+        name,
+        unnest(cell) AS c,
+        ST_MakeEnvelope(cell.x-5000, cell.y-5000, cell.x+5000, cell.y+5000)::GEOMETRY('EPSG:3035') AS geometry
+    FROM (
+        SELECT
+            unnest(ST_AsGrid(ST_Transform(geom, 'EPSG:4326', 'EPSG:3035', always_xy:=true), 1113000, 2852000, 10000, 10000, true)) AS cell,
+            iso3,
+            name
+        FROM
+            ST_Read('./test/data/world-administrative-boundaries.geojson')
+		WHERE
+			iso3 = 'ESP'
+    )
+    WHERE
+        cell.sub_geom IN (0,1,2,3,4,5,6)
+)
+SELECT
+	sub_geom,
+	count(*) AS c,
+	ST_Area(ST_Union_Agg(geometry)) AS area,
+	ST_Xmin(ST_Union_Agg(geometry)) AS xmin,
+	ST_Ymin(ST_Union_Agg(geometry)) AS ymin
+FROM
+	__input
+GROUP BY
+	sub_geom
+ORDER BY
+	sub_geom
+;
+----
+0	10	1000000000.0	1543000.0	1012000.0
+1	26	2600000000.0	1773000.0	942000.0
+2	10	1000000000.0	1633000.0	1022000.0
+3	33	3300000000.0	1683000.0	1002000.0
+4	32	3200000000.0	1903000.0	932000.0
+5	16	1600000000.0	1593000.0	1092000.0
+6	20	2000000000.0	1983000.0	1002000.0
+
+# Test ST_AsGrid (Without Global Origin)
+query III
+WITH __input AS (
+	SELECT
+        iso3,
+        name,
+        unnest(cell) AS c,
+        ST_MakeEnvelope(cell.x-5000, cell.y-5000, cell.x+5000, cell.y+5000)::GEOMETRY('EPSG:3035') AS geometry
+    FROM (
+        SELECT
+            unnest(ST_AsGrid(ST_Transform(geom, 'EPSG:4326', 'EPSG:3035', always_xy:=true), 10000, 10000, true)) AS cell,
+            iso3,
+            name
+        FROM
+            ST_Read('./test/data/world-administrative-boundaries.geojson')
+		WHERE
+			iso3 = 'ESP'
+    )
+    WHERE
+        cell.sub_geom IN (0,1,2,3,4,5,6)
+)
+SELECT
+	sub_geom,
+	count(*) AS c,
+	ST_Area(ST_Union_Agg(geometry)) AS area
+FROM
+	__input
+GROUP BY
+	sub_geom
+ORDER BY
+	sub_geom
+;
+----
+0	7	700000000.0
+1	28	2800000000.0
+2	11	1100000000.0
+3	35	3500000000.0
+4	30	3000000000.0
+5	16	1600000000.0
+6	17	1700000000.0

@@ -96,6 +96,31 @@ GeosGeometry LocalState::Deserialize(const string_t &blob) {
 } // namespace
 
 //------------------------------------------------------------------------------
+// Types
+//------------------------------------------------------------------------------
+
+namespace {
+
+struct GeosTypes {
+
+	static LogicalType GEOMETRY_CELL() {
+		return LogicalType::STRUCT({{"sub_geom", LogicalType::INTEGER},
+		                            {"col", LogicalType::INTEGER},
+		                            {"row", LogicalType::INTEGER},
+		                            {"x", LogicalType::DOUBLE},
+		                            {"y", LogicalType::DOUBLE}});
+	}
+
+	static void Register(ExtensionLoader &loader) {
+
+		// Register the GEOMETRY_CELL type
+		loader.RegisterType("GEOMETRY_CELL", GEOMETRY_CELL());
+	}
+};
+
+} // namespace
+
+//------------------------------------------------------------------------------
 // Base Functions
 //------------------------------------------------------------------------------
 
@@ -207,6 +232,247 @@ public:
 //------------------------------------------------------------------------------
 
 namespace {
+
+//======================================================================================================================
+// ST_AsGrid
+//======================================================================================================================
+
+struct ST_AsGrid {
+
+	//! Fills the grid cells for the given geometry and specified origin, cell size, and touch criteria.
+	static void FillGridOfCells(GEOSContextHandle_t ctx, const GeosGeometry &geom, idx_t sub_geom, double x_origin,
+	                            double y_origin, double x_size, double y_size, bool all_touch,
+	                            duckdb::vector<Value> &cells) {
+		double x_min, y_min, x_max, y_max;
+		geom.get_extent(x_min, y_min, x_max, y_max);
+
+		// Compute integer ranges from the origin so every cell boundary is aligned to
+		// origin + index * cell_size in both directions.
+
+		const auto x_direction = x_origin <= x_min ? 1.0 : -1.0;
+		const auto y_direction = y_origin <= y_min ? 1.0 : -1.0;
+
+		const auto x_min_offset = x_direction > 0 ? x_min - x_origin : x_origin - x_max;
+		const auto x_max_offset = x_direction > 0 ? x_max - x_origin : x_origin - x_min;
+		const auto y_min_offset = y_direction > 0 ? y_min - y_origin : y_origin - y_max;
+		const auto y_max_offset = y_direction > 0 ? y_max - y_origin : y_origin - y_min;
+
+		const auto x_start = static_cast<idx_t>(std::floor(x_min_offset / x_size));
+		const auto x_end = static_cast<idx_t>(std::ceil(x_max_offset / x_size));
+		const auto y_start = static_cast<idx_t>(std::floor(y_min_offset / y_size));
+		const auto y_end = static_cast<idx_t>(std::ceil(y_max_offset / y_size));
+
+		// Iterate over the grid cells within the computed integer ranges.
+
+		const auto prep_geom = geom.get_prepared();
+
+		for (idx_t xi = x_start; xi < x_end; xi++) {
+			for (idx_t yi = y_start; yi < y_end; yi++) {
+				const auto x_0 = x_origin + x_direction * static_cast<double>(xi) * x_size;
+				const auto y_0 = y_origin + y_direction * static_cast<double>(yi) * y_size;
+				const auto x_1 = x_0 + x_direction * x_size;
+				const auto y_1 = y_0 + y_direction * y_size;
+
+				const auto c_xmin = std::min(x_0, x_1);
+				const auto c_ymin = std::min(y_0, y_1);
+				const auto c_xmax = std::max(x_0, x_1);
+				const auto c_ymax = std::max(y_0, y_1);
+				const auto c_x = 0.5 * (c_xmin + c_xmax);
+				const auto c_y = 0.5 * (c_ymin + c_ymax);
+
+				// Determine if the current cell should be added.
+
+				bool selected;
+
+				if (all_touch) {
+					const GeosGeometry cell(ctx, c_xmin, c_ymin, c_xmax, c_ymax);
+					selected = prep_geom.intersects(cell);
+				} else {
+					auto *coord_seq = GEOSCoordSeq_create_r(ctx, 1, 2);
+					if (!coord_seq) {
+						throw InvalidInputException("Failed to create coordinate sequence for point.");
+					}
+					GEOSCoordSeq_setX_r(ctx, coord_seq, 0, c_x);
+					GEOSCoordSeq_setY_r(ctx, coord_seq, 0, c_y);
+					const GeosGeometry cell(ctx, GEOSGeom_createPoint_r(ctx, coord_seq));
+					selected = prep_geom.contains_properly(cell);
+				}
+
+				// If selected, add the cell to the result list.
+
+				if (selected) {
+					Value value = Value::STRUCT({{"sub_geom", Value::INTEGER(static_cast<int32_t>(sub_geom))},
+					                             {"col", Value::INTEGER(static_cast<int32_t>(xi))},
+					                             {"row", Value::INTEGER(static_cast<int32_t>(yi))},
+					                             {"x", Value::DOUBLE(c_x)},
+					                             {"y", Value::DOUBLE(c_y)}});
+
+					cells.push_back(value);
+				}
+			}
+		}
+	}
+
+	//! Execute the ST_AsGrid function without specifying a global origin.
+	static void ExecuteWithoutOrigin(DataChunk &args, ExpressionState &state, Vector &result) {
+		D_ASSERT(args.data.size() == 4);
+		const idx_t count = args.size();
+
+		auto &lstate = LocalState::ResetAndGet(state);
+		GEOSContextHandle_t ctx = lstate.GetContext();
+
+		for (idx_t i = 0; i < count; i++) {
+			Value blob = args.data[0].GetValue(i);
+			const auto geom = lstate.Deserialize(StringValue::Get(blob));
+
+			// Check the geometry type and fetch input parameters for the grid.
+
+			GEOSGeomTypes geom_type = geom.type();
+			const auto all_touch = args.data[3].GetValue(i).GetValue<bool>();
+
+			if (geom_type == GEOSGeomTypes::GEOS_POINT) {
+				throw InvalidInputException("ST_AsGrid does not support POINT geometries.");
+			} else if (geom_type == GEOSGeomTypes::GEOS_LINESTRING && !all_touch) {
+				throw InvalidInputException(
+				    "ST_AsGrid does not support LINESTRING geometries when `all_touch` is false.");
+			}
+
+			double x_min, y_min, x_max, y_max;
+			geom.get_extent(x_min, y_min, x_max, y_max);
+
+			const auto x_origin = x_min;
+			const auto y_origin = y_min;
+			const auto x_size = args.data[1].GetValue(i).GetValue<double>();
+			const auto y_size = args.data[2].GetValue(i).GetValue<double>();
+			const auto num_geometries = geom.get_num_geometries();
+
+			if (x_size <= 0 || y_size <= 0) {
+				throw InvalidInputException("ST_AsGrid: cell sizes must be positive.");
+			}
+
+			// Fill the grid of cells for each sub-geometry of the input geometry.
+
+			duckdb::vector<Value> cells;
+
+			for (idx_t geom_idx = 0; geom_idx < num_geometries; geom_idx++) {
+				const auto sub_geom = geom.get_geometry_n(geom_idx);
+				FillGridOfCells(ctx, sub_geom, geom_idx, x_origin, y_origin, x_size, y_size, all_touch, cells);
+			}
+
+			result.SetValue(i, Value::LIST(GeosTypes::GEOMETRY_CELL(), std::move(cells)));
+		}
+	}
+
+	//! Execute the ST_AsGrid function specifying a global origin.
+	static void ExecuteWithOrigin(DataChunk &args, ExpressionState &state, Vector &result) {
+		D_ASSERT(args.data.size() == 6);
+		const idx_t count = args.size();
+
+		auto &lstate = LocalState::ResetAndGet(state);
+		GEOSContextHandle_t ctx = lstate.GetContext();
+
+		for (idx_t i = 0; i < count; i++) {
+			Value blob = args.data[0].GetValue(i);
+			const auto geom = lstate.Deserialize(StringValue::Get(blob));
+
+			// Check the geometry type and fetch input parameters for the grid.
+
+			GEOSGeomTypes geom_type = geom.type();
+			const auto all_touch = args.data[5].GetValue(i).GetValue<bool>();
+
+			if (geom_type == GEOSGeomTypes::GEOS_POINT) {
+				throw InvalidInputException("ST_AsGrid does not support POINT geometries.");
+			} else if (geom_type == GEOSGeomTypes::GEOS_LINESTRING && !all_touch) {
+				throw InvalidInputException(
+				    "ST_AsGrid does not support LINESTRING geometries when `all_touch` is false.");
+			}
+
+			const auto x_origin = args.data[1].GetValue(i).GetValue<double>();
+			const auto y_origin = args.data[2].GetValue(i).GetValue<double>();
+			const auto x_size = args.data[3].GetValue(i).GetValue<double>();
+			const auto y_size = args.data[4].GetValue(i).GetValue<double>();
+			const auto num_geometries = geom.get_num_geometries();
+
+			if (x_size <= 0 || y_size <= 0) {
+				throw InvalidInputException("ST_AsGrid: cell sizes must be positive.");
+			}
+
+			// Fill the grid of cells for each sub-geometry of the input geometry.
+
+			duckdb::vector<Value> cells;
+
+			for (idx_t geom_idx = 0; geom_idx < num_geometries; geom_idx++) {
+				const auto sub_geom = geom.get_geometry_n(geom_idx);
+				FillGridOfCells(ctx, sub_geom, geom_idx, x_origin, y_origin, x_size, y_size, all_touch, cells);
+			}
+
+			result.SetValue(i, Value::LIST(GeosTypes::GEOMETRY_CELL(), std::move(cells)));
+		}
+	}
+
+	static constexpr auto DESCRIPTION = R"(
+		Returns the points at the centers of the uniform grid cells that cover the input geometry.
+
+		Function returns an array of `GEOMETRY_CELL` struct objects, each one contain the following fields:
+
+		| Field      | Type    | Description                                |
+		|------------|---------|--------------------------------------------|
+		| sub_geom   | INTEGER | Index of the sub-geometry within the input geometry |
+		| col        | INTEGER | Column index of the grid cell              |
+		| row        | INTEGER | Row index of the grid cell                 |
+		| x          | DOUBLE  | X coordinate of the center of the grid cell |
+		| y          | DOUBLE  | Y coordinate of the center of the grid cell |
+
+		The `x_origin` and `y_origin` parameters specify the origin of the grid. In other words, they define the coordinates of the grid's bottom-left corner.
+		The `x_size` and `y_size` parameters specify the width and height of each grid cell.
+
+		In case the origin is not specified, the grid is assumed to start at the bottom-left corner
+		of the bounding box of the input geometry.
+
+		If `all_touch` is `true`, the result includes every cell that intersects the input geometry,
+		otherwise, the result includes only cells whose center point is strictly contained in the input geometry.
+	)";
+	static constexpr auto EXAMPLE = R"(
+		SELECT ST_AsGrid(ST_GeomFromText('POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))'), 0, 0, 0.1, 0.1, false);
+	)";
+
+	static void Register(ExtensionLoader &loader) {
+
+		FunctionBuilder::RegisterScalar(loader, "ST_AsGrid", [](ScalarFunctionBuilder &func) {
+			func.AddVariant([](ScalarFunctionVariantBuilder &variant) {
+				variant.AddParameter("geom", LogicalType::GEOMETRY());
+				variant.AddParameter("x_size", LogicalType::DOUBLE);
+				variant.AddParameter("y_size", LogicalType::DOUBLE);
+				variant.AddParameter("all_touch", LogicalType::BOOLEAN);
+				variant.SetReturnType(LogicalType::LIST(GeosTypes::GEOMETRY_CELL()));
+
+				variant.SetInit(LocalState::Init);
+				variant.SetFunction(ExecuteWithoutOrigin);
+				variant.CanThrowErrors();
+			});
+
+			func.AddVariant([](ScalarFunctionVariantBuilder &variant) {
+				variant.AddParameter("geom", LogicalType::GEOMETRY());
+				variant.AddParameter("x_origin", LogicalType::DOUBLE);
+				variant.AddParameter("y_origin", LogicalType::DOUBLE);
+				variant.AddParameter("x_size", LogicalType::DOUBLE);
+				variant.AddParameter("y_size", LogicalType::DOUBLE);
+				variant.AddParameter("all_touch", LogicalType::BOOLEAN);
+				variant.SetReturnType(LogicalType::LIST(GeosTypes::GEOMETRY_CELL()));
+
+				variant.SetInit(LocalState::Init);
+				variant.SetFunction(ExecuteWithOrigin);
+				variant.CanThrowErrors();
+			});
+
+			func.SetDescription(DESCRIPTION);
+			func.SetExample(EXAMPLE);
+
+			func.SetTag("ext", "spatial");
+			func.SetTag("category", "construction");
+		});
+	}
+};
 
 //======================================================================================================================
 // ST_AsMVTGeom
@@ -3584,7 +3850,11 @@ struct ST_CoverageInvalidEdges_Agg : GEOSCoverageAggFunction {
 
 void RegisterGEOSModule(ExtensionLoader &loader) {
 
+	// Register types
+	GeosTypes::Register(loader);
+
 	// Scalar Functions
+	ST_AsGrid::Register(loader);
 	ST_AsMVTGeom::Register(loader);
 	ST_Boundary::Register(loader);
 	ST_Buffer::Register(loader);

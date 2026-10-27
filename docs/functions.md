@@ -1,6 +1,6 @@
 # DuckDB Spatial Function Reference
 
-## Function Index 
+## Function Index
 **[Scalar Functions](#scalar-functions)**
 
 | Function | Summary |
@@ -11,6 +11,7 @@
 | [`ST_Area`](#st_area) | Compute the area of a geometry. |
 | [`ST_Area_Spheroid`](#st_area_spheroid) | Returns the area of a geometry in meters, using an ellipsoidal model of the earth |
 | [`ST_AsGeoJSON`](#st_asgeojson) | Returns the geometry as a GeoJSON fragment |
+| [`ST_AsGrid`](#st_asgrid) | Returns the points at the centers of the uniform grid cells that cover the geometry. |
 | [`ST_AsHEXWKB`](#st_ashexwkb) | Returns the geometry as a HEXWKB string |
 | [`ST_AsMVTGeom`](#st_asmvtgeom) | Transform and clip geometry to a tile boundary |
 | [`ST_AsSVG`](#st_assvg) | Convert the geometry into a SVG fragment or path |
@@ -385,6 +386,53 @@ SELECT CAST({
 } AS JSON);
 ----
 {"type":"Feature","geometry":{"type":"Point","coordinates":[1.0,2.0]},"properties":{"name":"my_point"}}
+```
+
+----
+
+### ST_AsGrid
+
+
+#### Signature
+
+```sql
+GEOMETRY_CELL[] ST_AsGrid (geom GEOMETRY, x_origin DOUBLE, y_origin DOUBLE, x_size DOUBLE, y_size DOUBLE, all_touch BOOLEAN)
+GEOMETRY_CELL[] ST_AsGrid (geom GEOMETRY, x_size DOUBLE, y_size DOUBLE, all_touch BOOLEAN)
+```
+
+#### Description
+
+Returns the points at the centers of the uniform grid cells that cover the input geometry.
+
+Function returns an array of `GEOMETRY_CELL` struct objects, each one contain the following fields:
+
+| Field      | Type    | Description                                |
+|------------|---------|--------------------------------------------|
+| sub_geom   | INTEGER | Index of the sub-geometry within the input geometry |
+| col        | INTEGER | Column index of the grid cell              |
+| row        | INTEGER | Row index of the grid cell                 |
+| x          | DOUBLE  | X coordinate of the center of the grid cell |
+| y          | DOUBLE  | Y coordinate of the center of the grid cell |
+
+The `x_origin` and `y_origin` parameters specify the origin of the grid. In other words, they define the coordinates of the grid's bottom-left corner.
+The `x_size` and `y_size` parameters specify the width and height of each grid cell.
+
+In case the origin is not specified, the grid is assumed to start at the bottom-left corner
+of the bounding box of the input geometry.
+
+If `all_touch` is `true`, the result includes every cell that intersects the input geometry,
+otherwise, the result includes only cells whose center point is strictly contained in the input geometry.
+
+#### Example
+
+```sql
+SELECT unnest(ST_AsGrid(ST_GeomFromText('POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))'), 0, 0, 0.1, 0.1, false));
+----
+{'sub_geom': 0, 'col': 0, 'row': 0, 'x': 0.05, 'y': 0.05}
+{'sub_geom': 0, 'col': 0, 'row': 1, 'x': 0.05, 'y': 0.15}                        │
+{'sub_geom': 0, 'col': 0, 'row': 2, 'x': 0.05, 'y': 0.25}                                       │
+{'sub_geom': 0, 'col': 0, 'row': 3, 'x': 0.05, 'y': 0.35}
+...
 ```
 
 ----
@@ -1621,7 +1669,7 @@ DOUBLE ST_InterpolatePoint (line GEOMETRY, point GEOMETRY)
 
 Computes the closest point on a LINESTRING to a given POINT and returns the interpolated M value of that point.
 
-First argument must be a linestring and must have a M dimension. The second argument must be a point. 
+First argument must be a linestring and must have a M dimension. The second argument must be a point.
 Neither argument can be empty.
 
 ----
@@ -2880,7 +2928,7 @@ POINT (544615.0239773799 6867874.103539125)
 -- a [northing, easting] axis order instead, even though the source coordinate
 -- reference system definition (WGS84) says otherwise.
 
-SELECT 
+SELECT
     ST_Transform(
         -- note the axis order is reversed here
         st_point(4.892360, 52.373123),
