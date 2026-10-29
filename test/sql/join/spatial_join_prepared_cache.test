@@ -1,0 +1,84 @@
+# name: test/sql/join/spatial_join_prepared_cache.test
+# group: [join]
+
+# The spatial join evaluates GEOS predicates against prepared, cached build-side geometries
+# (spatial_join_prepared_cache_size). Its results must match the blockwise NL join for every predicate and join type,
+# whether the cache is disabled (0), smaller than the largest build geometry, or large enough to hold them all.
+
+require spatial
+
+statement ok
+PRAGMA threads=4;
+
+statement ok
+SET profiling_renderer_settings = MAP {'operator_casing': 'upper'};
+
+# Build side: one large polygon (a buffered point, 2048 segments per quarter circle) plus a grid of small squares
+statement ok
+CREATE TABLE polys AS
+SELECT 0 AS id, ST_Buffer(ST_Point(25, 25), 20, 2048) AS geom
+UNION ALL
+SELECT 1 + x * 10 + y AS id, ST_MakeEnvelope(x * 5, y * 5, x * 5 + 4, y * 5 + 4) AS geom
+FROM range(10) r1(x), range(10) r2(y);
+
+# Probe side: a grid of points, plus small polygons that cross the large polygon's boundary, plus NULLs
+statement ok
+CREATE TABLE probes AS
+SELECT x * 100 + y AS id, ST_Point(x * 0.5, y * 0.5) AS geom
+FROM range(100) r1(x), range(100) r2(y)
+UNION ALL
+SELECT 100000 + i AS id, ST_MakeEnvelope(4 + i * 0.7, 24, 6 + i * 0.7, 26) AS geom
+FROM range(60) r(i)
+UNION ALL
+SELECT 200000 + i AS id, NULL::GEOMETRY AS geom
+FROM range(10) r(i);
+
+foreach pred ST_Intersects ST_Contains ST_Within ST_Covers ST_CoveredBy ST_Touches ST_Crosses ST_Overlaps
+
+foreach jointype INNER LEFT RIGHT FULL
+
+# Reference results from the blockwise NL join
+statement ok
+SET disabled_optimizers='extension';
+
+statement ok
+CREATE OR REPLACE TABLE expected AS
+SELECT p.id AS probe_id, q.id AS poly_id
+FROM probes p {jointype} JOIN polys q ON {pred}(p.geom, q.geom);
+
+statement ok
+SET disabled_optimizers='';
+
+# 0 disables the prepared build side; 1024 bytes is smaller than the large polygon; the default holds everything
+foreach cache_size 0 1024 33554432
+
+statement ok
+SET spatial_join_prepared_cache_size = {cache_size};
+
+query II
+EXPLAIN SELECT p.id, q.id FROM probes p {jointype} JOIN polys q ON {pred}(p.geom, q.geom);
+----
+physical_plan	<REGEX>:.*SPATIAL_JOIN.*
+
+statement ok
+CREATE OR REPLACE TABLE actual AS
+SELECT p.id AS probe_id, q.id AS poly_id
+FROM probes p {jointype} JOIN polys q ON {pred}(p.geom, q.geom);
+
+query I
+SELECT count(*) FROM (
+    (SELECT * FROM expected EXCEPT ALL SELECT * FROM actual)
+    UNION ALL
+    (SELECT * FROM actual EXCEPT ALL SELECT * FROM expected)
+);
+----
+0
+
+endloop
+
+statement ok
+RESET spatial_join_prepared_cache_size;
+
+endloop
+
+endloop
