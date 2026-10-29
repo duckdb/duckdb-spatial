@@ -21,6 +21,10 @@ struct SpatialSettings {
 	static double RTreeIndexScanRatio(ClientContext &context);
 	static idx_t RTreeIndexScanMinRows(ClientContext &context);
 
+	//! Serialized bytes of build-side geometries each spatial join thread keeps deserialized and prepared.
+	//! 0 disables the prepared build side, and the join evaluates its predicate as a regular expression.
+	static idx_t JoinPreparedCacheSize(ClientContext &context);
+
 	static void Register(ExtensionLoader &loader);
 };
 
