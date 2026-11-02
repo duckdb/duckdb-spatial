@@ -193,15 +193,12 @@ static unique_ptr<GlobalTableFunctionState> RTreeIndexScanInitGlobal(ClientConte
 			RTreeBounds filter_bounds;
 			bool found = false;
 			if (input.filters) {
-				// The index stores *physical* column ids, while the scan's column ids are *logical*.
-				// These diverge when the table has generated columns, so convert before comparing.
-				const auto &indexed_columns = index_handle->GetColumnIds();
-				const auto indexed_column =
-				    bind_data.table.GetColumns().PhysicalToLogical(PhysicalIndex(indexed_columns[0])).index;
 				for (const auto &entry : *input.filters) {
-					// Only consider filters on the indexed column (the filter keys index into the scanned columns)
+					// Only consider filters on the indexed column (the filter keys index into the scanned columns).
+					// This also handles generated columns and pushed down struct field extracts.
 					const auto proj_idx = entry.GetIndex().GetIndex();
-					if (proj_idx >= input.column_ids.size() || input.column_ids[proj_idx] != indexed_column) {
+					if (proj_idx >= input.column_indexes.size() ||
+					    !index_handle->IsIndexedColumn(bind_data.table.GetColumns(), input.column_indexes[proj_idx])) {
 						continue;
 					}
 					ExtractBoundsFromFilter(entry.Filter(), filter_bounds, found);
@@ -424,15 +421,21 @@ static void RTreeIndexScanExecute(ClientContext &context, TableFunctionInput &da
 //-------------------------------------------------------------------------
 // Statistics
 //-------------------------------------------------------------------------
-static unique_ptr<BaseStatistics> RTreeIndexScanStatistics(ClientContext &context, const FunctionData *bind_data_p,
-                                                           column_t column_id) {
-	auto &bind_data = bind_data_p->Cast<RTreeIndexScanBindData>();
+static unique_ptr<BaseStatistics> RTreeIndexScanStatistics(ClientContext &context,
+                                                           TableFunctionGetStatisticsInput &input) {
+	auto &bind_data = input.bind_data->Cast<RTreeIndexScanBindData>();
 	auto &local_storage = LocalStorage::Get(context, bind_data.table.catalog);
 	if (local_storage.Find(bind_data.table.GetStorage())) {
 		// we don't emit any statistics for tables that have outstanding transaction-local data
 		return nullptr;
 	}
-	return bind_data.table.GetStatistics(context, column_id);
+	// Take the full column index into account, which may have a struct field extract pushed down into the scan
+	// (in which case we need the statistics of the extracted field, not the whole struct)
+	auto &column_id = input.column_index;
+	if (column_id.IsVirtualColumn() || bind_data.table.GetColumn(column_id.ToLogical()).Generated()) {
+		return nullptr;
+	}
+	return bind_data.table.GetStatistics(context, bind_data.table.GetStorageIndex(column_id));
 }
 
 //-------------------------------------------------------------------------
@@ -564,7 +567,7 @@ TableFunction RTreeIndexScanFunction::GetFunction() {
 	TableFunction func("rtree_index_scan", {}, RTreeIndexScanExecute);
 	func.init_local = RTreeIndexScanInitLocal;
 	func.init_global = RTreeIndexScanInitGlobal;
-	func.statistics = RTreeIndexScanStatistics;
+	func.statistics_extended = RTreeIndexScanStatistics;
 	func.dependency = RTreeIndexScanDependency;
 	func.cardinality = RTreeIndexScanCardinality;
 	func.pushdown_complex_filter = nullptr;

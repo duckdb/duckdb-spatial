@@ -72,3 +72,63 @@ SELECT (SELECT count(*) FROM t p JOIN build_b b ON ST_DWithin(p.geom_b, b.geom, 
      = (SELECT count(*) FROM t_noidx p JOIN build_b b ON ST_DWithin(p.geom_b, b.geom, 3.0));
 ----
 true
+
+# The same applies to the plan-time index scans for constant predicates. Here the index on c (physical id 2) used
+# to be matched against filters on a (logical id 1) and b (logical id 2), silently dropping all matching rows.
+statement ok
+CREATE TABLE t2 (g AS (1), a GEOMETRY, b GEOMETRY, c GEOMETRY);
+
+statement ok
+INSERT INTO t2 (a, b, c)
+SELECT ST_Point(x, y), ST_Point(x + 500, y + 500), ST_Point(x + 1000, y + 1000)
+FROM range(0, 100) r1(x), range(0, 100) r2(y);
+
+statement ok
+CREATE INDEX t2_idx ON t2 USING RTREE (c);
+
+query II
+EXPLAIN SELECT count(*) FROM t2 WHERE ST_Intersects(a, ST_MakeEnvelope(10, 10, 12, 12));
+----
+physical_plan	<!REGEX>:.*RTREE_INDEX_SCAN.*
+
+query I
+SELECT count(*) FROM t2 WHERE ST_Intersects(a, ST_MakeEnvelope(10, 10, 12, 12));
+----
+9
+
+query II
+EXPLAIN SELECT count(*) FROM t2 WHERE ST_Intersects(c, ST_MakeEnvelope(1010, 1010, 1012, 1012));
+----
+physical_plan	<REGEX>:.*RTREE_INDEX_SCAN.*
+
+query I
+SELECT count(*) FROM t2 WHERE ST_Intersects(c, ST_MakeEnvelope(1010, 1010, 1012, 1012));
+----
+9
+
+# Without filter pushdown (the spatial predicate stays in a filter on top of the scan)
+statement ok
+SET disabled_optimizers = 'filter_pushdown';
+
+query II
+EXPLAIN SELECT count(*) FROM t2 WHERE ST_Intersects(b, ST_MakeEnvelope(510, 510, 512, 512));
+----
+physical_plan	<!REGEX>:.*RTREE_INDEX_SCAN.*
+
+query I
+SELECT count(*) FROM t2 WHERE ST_Intersects(b, ST_MakeEnvelope(510, 510, 512, 512));
+----
+9
+
+query II
+EXPLAIN SELECT count(*) FROM t2 WHERE ST_Intersects(c, ST_MakeEnvelope(1010, 1010, 1012, 1012));
+----
+physical_plan	<REGEX>:.*RTREE_INDEX_SCAN.*
+
+query I
+SELECT count(*) FROM t2 WHERE ST_Intersects(c, ST_MakeEnvelope(1010, 1010, 1012, 1012));
+----
+9
+
+statement ok
+RESET disabled_optimizers;

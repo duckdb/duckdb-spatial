@@ -1,0 +1,158 @@
+# name: test/sql/index/rtree_struct_field_index.test
+# description: Test RTREE indexes over a struct field, with struct field extracts pushed down into the scan
+# group: [index]
+
+# A scan that only needs a struct field (e.g. "s.g") extracts it directly, instead of reading the whole struct.
+# Such a scan can use an index built over that same field, but not an index over a different field of the struct.
+require spatial
+
+statement ok
+SET profiling_renderer_settings = MAP {'operator_casing': 'upper'};
+
+statement ok
+PRAGMA threads=4;
+
+statement ok
+CREATE TABLE u AS SELECT range AS id,
+	{'g': ST_Point(range % 100, range // 100), 'h': ST_Point(range % 100 + 500, range // 100 + 500)} AS s
+FROM range(10000);
+
+statement ok
+CREATE TABLE u_noidx AS FROM u;
+
+statement ok
+CREATE INDEX u_idx ON u USING RTREE ((s.g));
+
+# Only the indexed field is scanned
+query II
+EXPLAIN SELECT count(*) FROM u WHERE ST_Intersects(s.g, ST_MakeEnvelope(10, 10, 12, 12));
+----
+physical_plan	<REGEX>:.*RTREE_INDEX_SCAN.*
+
+query I
+SELECT id FROM u WHERE ST_Intersects(s.g, ST_MakeEnvelope(10, 10, 12, 12)) ORDER BY id;
+----
+1010
+1011
+1012
+1110
+1111
+1112
+1210
+1211
+1212
+
+query I
+SELECT (SELECT list(id ORDER BY id) FROM u WHERE ST_DWithin(s.g, ST_Point(50, 50), 3))
+	= (SELECT list(id ORDER BY id) FROM u_noidx WHERE ST_DWithin(s.g, ST_Point(50, 50), 3));
+----
+true
+
+# The whole struct is scanned
+query II
+EXPLAIN SELECT s FROM u WHERE ST_Intersects(s.g, ST_MakeEnvelope(10, 10, 12, 12));
+----
+physical_plan	<REGEX>:.*RTREE_INDEX_SCAN.*
+
+query I
+SELECT (SELECT list(s ORDER BY id) FROM u WHERE ST_Intersects(s.g, ST_MakeEnvelope(10, 10, 12, 12)))
+	= (SELECT list(s ORDER BY id) FROM u_noidx WHERE ST_Intersects(s.g, ST_MakeEnvelope(10, 10, 12, 12)));
+----
+true
+
+# A different field of the indexed struct can not use the index
+query II
+EXPLAIN SELECT count(*) FROM u WHERE ST_Intersects(s.h, ST_MakeEnvelope(510, 510, 512, 512));
+----
+physical_plan	<!REGEX>:.*RTREE_INDEX_SCAN.*
+
+query I
+SELECT count(*) FROM u WHERE ST_Intersects(s.h, ST_MakeEnvelope(510, 510, 512, 512));
+----
+9
+
+# A spatial join probing the indexed field uses a deferred-bounds index scan
+statement ok
+CREATE TABLE build_g (geom GEOMETRY);
+
+statement ok
+INSERT INTO build_g VALUES (ST_Point(50.5, 50.5));
+
+statement ok
+CREATE TABLE build_h (geom GEOMETRY);
+
+statement ok
+INSERT INTO build_h VALUES (ST_Point(550.5, 550.5));
+
+query II
+EXPLAIN SELECT count(*) FROM u p JOIN build_g b ON ST_DWithin(p.s.g, b.geom, 3.0);
+----
+physical_plan	<REGEX>:.*RTREE_INDEX_SCAN.*deferred.*
+
+query I
+SELECT (SELECT list(p.id ORDER BY p.id) FROM u p JOIN build_g b ON ST_DWithin(p.s.g, b.geom, 3.0))
+	= (SELECT list(p.id ORDER BY p.id) FROM u_noidx p JOIN build_g b ON ST_DWithin(p.s.g, b.geom, 3.0));
+----
+true
+
+# A spatial join probing a different field must not use the index on s.g (this used to return no rows)
+query II
+EXPLAIN SELECT count(*) FROM u p JOIN build_h b ON ST_DWithin(p.s.h, b.geom, 3.0);
+----
+physical_plan	<!REGEX>:.*RTREE_INDEX_SCAN.*
+
+query I
+SELECT count(*) FROM u p JOIN build_h b ON ST_DWithin(p.s.h, b.geom, 3.0);
+----
+32
+
+# Both fields are scanned, but the join probes the non-indexed one
+query I
+SELECT (SELECT list(p.id ORDER BY p.id) FROM u p JOIN build_h b ON ST_DWithin(p.s.h, b.geom, 3.0) WHERE ST_X(p.s.g) > 49)
+	= (SELECT list(p.id ORDER BY p.id) FROM u_noidx p JOIN build_h b ON ST_DWithin(p.s.h, b.geom, 3.0) WHERE ST_X(p.s.g) > 49);
+----
+true
+
+# Same, without filter pushdown (the spatial predicate stays in a filter on top of the scan)
+statement ok
+SET disabled_optimizers = 'filter_pushdown';
+
+query II
+EXPLAIN SELECT count(*) FROM u WHERE ST_Intersects(s.g, ST_MakeEnvelope(10, 10, 12, 12));
+----
+physical_plan	<REGEX>:.*RTREE_INDEX_SCAN.*
+
+query I
+SELECT count(*) FROM u WHERE ST_Intersects(s.g, ST_MakeEnvelope(10, 10, 12, 12));
+----
+9
+
+query II
+EXPLAIN SELECT count(*) FROM u WHERE ST_Intersects(s.h, ST_MakeEnvelope(510, 510, 512, 512));
+----
+physical_plan	<!REGEX>:.*RTREE_INDEX_SCAN.*
+
+query I
+SELECT count(*) FROM u WHERE ST_Intersects(s.h, ST_MakeEnvelope(510, 510, 512, 512));
+----
+9
+
+statement ok
+RESET disabled_optimizers;
+
+# Nested struct field index
+statement ok
+CREATE TABLE n AS SELECT range AS id, {'a': {'g': ST_Point(range % 100, range // 100)}} AS s FROM range(10000);
+
+statement ok
+CREATE INDEX n_idx ON n USING RTREE ((s.a.g));
+
+query II
+EXPLAIN SELECT count(*) FROM n WHERE ST_Intersects(s.a.g, ST_MakeEnvelope(10, 10, 12, 12));
+----
+physical_plan	<REGEX>:.*RTREE_INDEX_SCAN.*
+
+query I
+SELECT count(*) FROM n WHERE ST_Intersects(s.a.g, ST_MakeEnvelope(10, 10, 12, 12));
+----
+9

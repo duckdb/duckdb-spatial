@@ -13,6 +13,7 @@ namespace duckdb {
 
 class PhysicalOperator;
 class DuckTransaction;
+class ColumnList;
 
 class RTreeIndex final : public BoundIndex {
 public:
@@ -48,6 +49,12 @@ public:
 	//! Committed deletes are removed from the index right away (we do not keep them in a delta index), so a transaction
 	//! whose snapshot predates such a commit cannot rely on the index. The index must be (at least) read-locked.
 	bool MayMissVisibleRows(const DuckTransaction &transaction) const;
+
+	//! Whether the given scanned column produces exactly the values this index is built over: the indexed column
+	//! itself, or (for an index over a struct field, e.g. "s.geom") a scan with that same field extract pushed down.
+	//! The scanned column is identified by its *logical* column index, the conversion from the *physical* column ids
+	//! stored in the index is done here.
+	bool IsIndexedColumn(const ColumnList &columns, const ColumnIndex &column_index) const;
 
 	static unique_ptr<BoundIndex> Create(CreateIndexInput &input) {
 		auto res = make_uniq<RTreeIndex>(input.name, input.constraint_type, input.column_ids, input.table_io_manager,

@@ -4,6 +4,8 @@
 
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/scalar_function_catalog_entry.hpp"
+#include "duckdb/function/scalar/struct_utils.hpp"
+#include "duckdb/parser/column_list.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/common/serializer/binary_deserializer.hpp"
@@ -239,6 +241,69 @@ bool RTreeIndex::MayMissVisibleRows(const DuckTransaction &transaction) const {
 	}
 	// Something committed after this transaction started, which may have deleted rows this transaction still sees
 	return last_commit > transaction.start_time;
+}
+
+//! Collect the struct field path that an index expression extracts from the indexed column (empty for a plain column)
+static bool TryGetStructExtractPath(const Expression &expr, vector<idx_t> &path) {
+	if (expr.GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
+		return true;
+	}
+	if (expr.GetExpressionClass() != ExpressionClass::BOUND_FUNCTION) {
+		return false;
+	}
+	// The same struct extract functions that the scan can push down
+	auto &func = expr.Cast<BoundFunctionExpression>();
+	const auto &name = func.Function().GetName();
+	if (name != "struct_extract" && name != "struct_extract_at" && name != "array_extract") {
+		return false;
+	}
+	if (!func.BindInfo() || func.GetChildren().empty() ||
+	    func.GetChildren()[0]->GetReturnType().id() != LogicalTypeId::STRUCT) {
+		return false;
+	}
+	if (!TryGetStructExtractPath(*func.GetChildren()[0], path)) {
+		return false;
+	}
+	path.push_back(func.BindInfo()->Cast<StructExtractBindData>().index);
+	return true;
+}
+
+bool RTreeIndex::IsIndexedColumn(const ColumnList &columns, const ColumnIndex &column_index) const {
+	auto &indexed_columns = GetColumnIds();
+	if (indexed_columns.size() != 1 || unbound_expressions.size() != 1) {
+		return false;
+	}
+	if (column_index.IsVirtualColumn()) {
+		return false;
+	}
+	const auto indexed_column = columns.GetColumn(PhysicalIndex(indexed_columns[0])).Logical().index;
+	if (column_index.GetPrimaryIndex() != indexed_column) {
+		return false;
+	}
+
+	auto &index_expr = *unbound_expressions[0];
+	vector<idx_t> index_path;
+	if (!TryGetStructExtractPath(index_expr, index_path)) {
+		return false;
+	}
+
+	// Collect the struct field path extracted by the scan (if any)
+	vector<idx_t> scan_path;
+	reference<const ColumnIndex> current = column_index;
+	while (current.get().IsPushdownExtract()) {
+		current = current.get().GetChildIndex(0);
+		if (!current.get().HasPrimaryIndex()) {
+			return false;
+		}
+		scan_path.push_back(current.get().GetPrimaryIndex());
+	}
+
+	// Either both the index and the scan refer to the whole column, or the scan extracts the indexed field
+	// (in which case it must not have pushed down a cast either)
+	if (index_path != scan_path) {
+		return false;
+	}
+	return scan_path.empty() || column_index.GetScanType() == index_expr.GetReturnType();
 }
 
 void RTreeIndex::ResetStorage(IndexLock &index_lock) {
