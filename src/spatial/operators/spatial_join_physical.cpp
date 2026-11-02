@@ -24,6 +24,14 @@
 #include "duckdb/storage/buffer_manager.hpp"
 
 #include "spatial/util/math.hpp"
+#include "spatial/spatial_settings.hpp"
+
+#ifdef SPATIAL_USE_GEOS
+#include "spatial/modules/geos/geos_geometry.hpp"
+#include "spatial/modules/geos/geos_serde.hpp"
+#include "duckdb/storage/arena_allocator.hpp"
+#include "duckdb/common/list.hpp"
+#endif
 
 namespace duckdb {
 
@@ -531,6 +539,255 @@ SinkFinalizeType PhysicalSpatialJoin::Finalize(Pipeline &pipeline, Event &event,
 }
 
 //----------------------------------------------------------------------------------------------------------------------
+// Prepared Build Side
+//----------------------------------------------------------------------------------------------------------------------
+// Evaluating the join predicate as a regular expression deserializes both geometries of every candidate pair and runs
+// the predicate unprepared: the constant-argument fast path of the GEOS predicates never applies, because the join
+// passes the build side as a dictionary vector. A large build-side polygon matched by many probe rows (e.g. a 1M+
+// vertex polygon over thousands of points) is then decoded again, and all its edges re-scanned, for every candidate
+// pair. Instead, for GEOS predicates, each probe thread keeps the build-side geometries it touches deserialized and
+// prepared, keyed by their (pinned) row pointer, in a small LRU cache, and evaluates the predicate against the prepared
+// geometry directly. Prepared geometries build their indexes lazily and are not thread-safe, hence a cache per thread
+// rather than one shared cache. A geometry is only prepared on its second use, and one larger than the whole cache is
+// not cached, so that a cache too small for the working set does not re-prepare or evict on every candidate.
+
+namespace {
+
+// The prepared operation to run as `prepared_build.op(probe)` so that it equals `predicate(probe, build)`
+enum class PreparedJoinPredicate : uint8_t {
+	NONE = 0,
+	INTERSECTS,
+	CONTAINS,
+	CONTAINS_PROPERLY,
+	WITHIN,
+	COVERS,
+	COVERED_BY,
+	TOUCHES,
+	CROSSES,
+	OVERLAPS,
+};
+
+#ifdef SPATIAL_USE_GEOS
+
+PreparedJoinPredicate GetPreparedJoinPredicate(const Expression &condition) {
+	auto &func = condition.Cast<BoundFunctionExpression>();
+	if (func.GetChildren().size() != 2) {
+		return PreparedJoinPredicate::NONE;
+	}
+	for (auto &child : func.GetChildren()) {
+		if (child->GetReturnType().id() != LogicalTypeId::GEOMETRY) {
+			return PreparedJoinPredicate::NONE;
+		}
+	}
+
+	// The probe side is the first argument, the build side the second
+	const auto name = func.Function().GetName().GetIdentifierName();
+	if (name == "ST_Intersects") {
+		return PreparedJoinPredicate::INTERSECTS;
+	}
+	if (name == "ST_Contains") {
+		return PreparedJoinPredicate::WITHIN;
+	}
+	if (name == "ST_Within") {
+		return PreparedJoinPredicate::CONTAINS;
+	}
+	if (name == "ST_WithinProperly") {
+		return PreparedJoinPredicate::CONTAINS_PROPERLY;
+	}
+	if (name == "ST_Covers") {
+		return PreparedJoinPredicate::COVERED_BY;
+	}
+	if (name == "ST_CoveredBy") {
+		return PreparedJoinPredicate::COVERS;
+	}
+	if (name == "ST_Touches") {
+		return PreparedJoinPredicate::TOUCHES;
+	}
+	if (name == "ST_Crosses") {
+		return PreparedJoinPredicate::CROSSES;
+	}
+	if (name == "ST_Overlaps") {
+		return PreparedJoinPredicate::OVERLAPS;
+	}
+	// ST_ContainsProperly has no prepared inverse, and ST_Equals, ST_DWithin and ST_Intersects_Extent are not
+	// (prepared) GEOS predicates, so these keep the regular expression path.
+	return PreparedJoinPredicate::NONE;
+}
+
+bool EvaluateJoinPredicate(PreparedJoinPredicate predicate, const GeosGeometry &build, const GeosGeometry &probe) {
+	switch (predicate) {
+	case PreparedJoinPredicate::INTERSECTS:
+		return build.intersects(probe);
+	case PreparedJoinPredicate::CONTAINS:
+		return build.contains(probe);
+	case PreparedJoinPredicate::WITHIN:
+		return build.within(probe);
+	case PreparedJoinPredicate::COVERS:
+		return build.covers(probe);
+	case PreparedJoinPredicate::COVERED_BY:
+		return build.covered_by(probe);
+	case PreparedJoinPredicate::TOUCHES:
+		return build.touches(probe);
+	case PreparedJoinPredicate::CROSSES:
+		return build.crosses(probe);
+	case PreparedJoinPredicate::OVERLAPS:
+		return build.overlaps(probe);
+	default:
+		throw InternalException("Unexpected spatial join predicate");
+	}
+}
+
+bool EvaluateJoinPredicate(PreparedJoinPredicate predicate, const PreparedGeosGeometry &build,
+                           const GeosGeometry &probe) {
+	switch (predicate) {
+	case PreparedJoinPredicate::INTERSECTS:
+		return build.intersects(probe);
+	case PreparedJoinPredicate::CONTAINS:
+		return build.contains(probe);
+	case PreparedJoinPredicate::CONTAINS_PROPERLY:
+		return build.contains_properly(probe);
+	case PreparedJoinPredicate::WITHIN:
+		return build.within(probe);
+	case PreparedJoinPredicate::COVERS:
+		return build.covers(probe);
+	case PreparedJoinPredicate::COVERED_BY:
+		return build.covered_by(probe);
+	case PreparedJoinPredicate::TOUCHES:
+		return build.touches(probe);
+	case PreparedJoinPredicate::CROSSES:
+		return build.crosses(probe);
+	case PreparedJoinPredicate::OVERLAPS:
+		return build.overlaps(probe);
+	default:
+		throw InternalException("Unexpected spatial join predicate");
+	}
+}
+
+class PreparedBuildCache {
+public:
+	PreparedBuildCache(ClientContext &context, idx_t capacity_p)
+	    : arena(BufferAllocator::Get(context)), capacity(capacity_p) {
+		ctx = GEOS_init_r();
+		GEOSContext_setErrorMessageHandler_r(
+		    ctx, [](const char *message, void *) { throw InvalidInputException(message); }, nullptr);
+	}
+
+	~PreparedBuildCache() {
+		// The geometries must be destroyed before the context they were created in
+		probe.reset();
+		lookup.clear();
+		entries.clear();
+		GEOS_finish_r(ctx);
+	}
+
+	//! Evaluates the predicate for the build-side geometry stored at the given (pinned) row
+	bool Evaluate(PreparedJoinPredicate predicate, data_ptr_t row, const string_t &blob, const GeosGeometry &probe) {
+		if (blob.GetSize() > capacity) {
+			// Too large to cache: evaluate it like the unprepared path would, rather than evicting everything else
+			const auto geom = Deserialize(blob);
+			if (predicate == PreparedJoinPredicate::CONTAINS_PROPERLY) {
+				return EvaluateJoinPredicate(predicate, geom.get_prepared(), probe);
+			}
+			return EvaluateJoinPredicate(predicate, geom, probe);
+		}
+
+		auto &entry = GetBuild(row, blob);
+		if (!entry.prepared && (entry.uses++ > 0 || predicate == PreparedJoinPredicate::CONTAINS_PROPERLY)) {
+			// GEOS has no unprepared ContainsProperly
+			entry.prepared = make_uniq<PreparedGeosGeometry>(entry.geom.get_prepared());
+		}
+		if (entry.prepared) {
+			return EvaluateJoinPredicate(predicate, *entry.prepared, probe);
+		}
+		return EvaluateJoinPredicate(predicate, entry.geom, probe);
+	}
+
+	//! The probe-side geometry of the given input row. Consecutive candidate pairs share the probe row, so the last
+	//! one is kept until the row (or the input chunk, see ResetProbe) changes.
+	const GeosGeometry &GetProbe(idx_t input_idx, const string_t &blob) {
+		if (!probe || probe_idx != input_idx) {
+			probe.reset();
+			probe = make_uniq<GeosGeometry>(Deserialize(blob));
+			probe_idx = input_idx;
+		}
+		return *probe;
+	}
+
+	void ResetProbe() {
+		probe.reset();
+	}
+
+private:
+	struct Entry {
+		Entry(data_ptr_t row_p, idx_t size_p, GeosGeometry geom_p) : row(row_p), size(size_p), geom(std::move(geom_p)) {
+		}
+		data_ptr_t row;
+		idx_t size;
+		idx_t uses = 0;
+		// Declared before the prepared geometry, so that it is destroyed after it
+		GeosGeometry geom;
+		unique_ptr<PreparedGeosGeometry> prepared;
+	};
+
+	//! The cache entry of the build-side geometry stored at the given (pinned) row.
+	//! The reference stays valid until the next call, which may evict it.
+	Entry &GetBuild(data_ptr_t row, const string_t &blob) {
+		const auto it = lookup.find(row);
+		if (it != lookup.end()) {
+			entries.splice(entries.begin(), entries, it->second);
+			return entries.front();
+		}
+
+		entries.emplace_front(row, blob.GetSize(), Deserialize(blob));
+		lookup[row] = entries.begin();
+		size += blob.GetSize();
+
+		// Evict the least recently used geometries (the one we just added fits by itself, see Evaluate)
+		while (size > capacity && entries.size() > 1) {
+			auto &last = entries.back();
+			size -= last.size;
+			lookup.erase(last.row);
+			entries.pop_back();
+		}
+		return entries.front();
+	}
+
+	GeosGeometry Deserialize(const string_t &blob) {
+		// GEOS copies the coordinates out of the arena, so the arena only ever holds one geometry's staging buffers
+		arena.Reset();
+		const auto geom = GeosSerde::Deserialize(ctx, arena, blob.GetData(), blob.GetSize());
+		arena.Reset();
+		if (geom == nullptr) {
+			throw InvalidInputException("Could not deserialize geometry");
+		}
+		return GeosGeometry(ctx, geom);
+	}
+
+	GEOSContextHandle_t ctx;
+	ArenaAllocator arena;
+
+	idx_t capacity;
+	idx_t size = 0;
+	list<Entry> entries;
+	unordered_map<data_ptr_t, list<Entry>::iterator> lookup;
+
+	unique_ptr<GeosGeometry> probe;
+	idx_t probe_idx = 0;
+};
+
+#else
+
+PreparedJoinPredicate GetPreparedJoinPredicate(const Expression &) {
+	return PreparedJoinPredicate::NONE;
+}
+
+class PreparedBuildCache {};
+
+#endif
+
+} // namespace
+
+//----------------------------------------------------------------------------------------------------------------------
 // Operator Interface
 //----------------------------------------------------------------------------------------------------------------------
 // This is where we do the probing of the rtree.
@@ -580,6 +837,10 @@ public:
 	idx_t build_side_match_offset = 0;
 	unsafe_unique_array<data_ptr_t> build_side_pointers = nullptr;
 
+	// Set when the predicate is evaluated against prepared build-side geometries (see PreparedBuildCache)
+	PreparedJoinPredicate prepared_predicate = PreparedJoinPredicate::NONE;
+	unique_ptr<PreparedBuildCache> prepared_build;
+
 	explicit SpatialJoinLocalOperatorState(ClientContext &context)
 	    : join_probe_executor(context), join_match_executor(context), bbox_probe_executor(context),
 	      probe_side_source_sel(STANDARD_VECTOR_SIZE), build_side_source_sel(STANDARD_VECTOR_SIZE),
@@ -624,6 +885,17 @@ unique_ptr<OperatorState> PhysicalSpatialJoin::GetOperatorState(ExecutionContext
 	func_expr.GetChildrenMutable()[1] = make_uniq<BoundReferenceExpression>(build_side_key->GetReturnType(), 1);
 
 	lstate->join_match_executor.AddExpression(*lstate->match_expr);
+
+#ifdef SPATIAL_USE_GEOS
+	// Evaluate GEOS predicates against prepared build-side geometries, unless disabled
+	const auto prepared_cache_size = SpatialSettings::JoinPreparedCacheSize(context.client);
+	if (prepared_cache_size > 0) {
+		lstate->prepared_predicate = GetPreparedJoinPredicate(*condition);
+		if (lstate->prepared_predicate != PreparedJoinPredicate::NONE) {
+			lstate->prepared_build = make_uniq<PreparedBuildCache>(context.client, prepared_cache_size);
+		}
+	}
+#endif
 
 	// Add the probe side join key expression
 	lstate->join_probe_executor.AddExpression(*probe_side_key);
@@ -713,6 +985,12 @@ OperatorResultType PhysicalSpatialJoin::ExecuteInternal(ExecutionContext &contex
 
 			// zero miss vector
 			memset(lstate.left_outer_marker, 0, sizeof(lstate.left_outer_marker));
+
+#ifdef SPATIAL_USE_GEOS
+			if (lstate.prepared_build) {
+				lstate.prepared_build->ResetProbe();
+			}
+#endif
 
 			// Reset the input index and move on to the next state
 			lstate.input_index = 0;
@@ -825,12 +1103,12 @@ OperatorResultType PhysicalSpatialJoin::ExecuteInternal(ExecutionContext &contex
 				                          target, lstate.build_side_target_sel, nullptr);
 			}
 
-			// Also collect the build side row pointers (if we have a match column)
+			// Also collect the build side row pointers (if we have a match column, or cache prepared build rows)
 			// Note: we must offset by matches_idx here, just like build_side_source_sel above. A single probe's
 			// candidate batch can be split across multiple output chunks, and in that case we resume in the middle of
 			// the batch. Reading from the start of the batch would mark the wrong build rows as matched, dropping them
 			// from the right-outer output while emitting the actual matches twice.
-			if (IsRightOuterJoin(join_type)) {
+			if (IsRightOuterJoin(join_type) || lstate.prepared_build) {
 				const auto ptrs = FlatVector::GetDataMutable<data_ptr_t>(row_pointers);
 				for (idx_t i = 0; i < scan_count; i++) {
 					lstate.build_side_pointers[output_index + i] = ptrs[lstate.scan.matches_idx + i];
@@ -864,13 +1142,37 @@ OperatorResultType PhysicalSpatialJoin::ExecuteInternal(ExecutionContext &contex
 			chunk.Slice(lstate.probe_side_row_chunk, lstate.probe_side_source_sel, output_index);
 
 			// Now, lets actually evaluate the predicate
-			lstate.match_pred_arg_chunk.data[0].Slice(lstate.probe_side_key_chunk.data[0], lstate.probe_side_source_sel,
-			                                          output_index);
-			lstate.match_pred_arg_chunk.data[1].Reference(lstate.build_side_key_chunk.data[0]);
-			lstate.match_pred_arg_chunk.SetCardinality(output_index);
+			idx_t filtered = 0;
+#ifdef SPATIAL_USE_GEOS
+			if (lstate.prepared_build) {
+				const auto probe_data = UnifiedVectorFormat::GetData<string_t>(lstate.probe_side_key_vformat);
+				auto &build_vec = lstate.build_side_key_chunk.data[0];
+				const auto build_data = FlatVector::GetData<string_t>(build_vec);
+				const auto &build_validity = FlatVector::Validity(build_vec);
 
-			const auto filtered =
-			    lstate.join_match_executor.SelectExpression(lstate.match_pred_arg_chunk, lstate.match_sel);
+				for (idx_t i = 0; i < output_index; i++) {
+					const auto probe_row = lstate.probe_side_source_sel.get_index(i);
+					const auto probe_idx = lstate.probe_side_key_vformat.sel->get_index(probe_row);
+					if (!lstate.probe_side_key_vformat.validity.RowIsValid(probe_idx) ||
+					    !build_validity.RowIsValid(i)) {
+						continue;
+					}
+					const auto &probe_geom = lstate.prepared_build->GetProbe(probe_row, probe_data[probe_idx]);
+					if (lstate.prepared_build->Evaluate(lstate.prepared_predicate, lstate.build_side_pointers[i],
+					                                    build_data[i], probe_geom)) {
+						lstate.match_sel.set_index(filtered++, i);
+					}
+				}
+			} else
+#endif
+			{
+				lstate.match_pred_arg_chunk.data[0].Slice(lstate.probe_side_key_chunk.data[0],
+				                                          lstate.probe_side_source_sel, output_index);
+				lstate.match_pred_arg_chunk.data[1].Reference(lstate.build_side_key_chunk.data[0]);
+				lstate.match_pred_arg_chunk.SetCardinality(output_index);
+
+				filtered = lstate.join_match_executor.SelectExpression(lstate.match_pred_arg_chunk, lstate.match_sel);
+			}
 
 			if (IsLeftOuterJoin(join_type)) {
 				for (idx_t i = 0; i < filtered; i++) {
