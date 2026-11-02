@@ -1,0 +1,145 @@
+# name: test/sql/index/rtree_struct_filter.test
+# description: Test filtering on struct fields (pushed down struct field extracts) together with an RTREE index scan (#906)
+# group: [index]
+
+# When a scan is rewritten to an R-tree index scan, its pushed-down table filters are pulled up into a LogicalFilter.
+# A filter on a struct field applies to the field extracted by the scan, so the pulled-up filter has to reference the
+# extracted field type (e.g. DOUBLE), not the type of the whole struct column.
+require spatial
+
+statement ok
+SET profiling_renderer_settings = MAP {'operator_casing': 'upper'};
+
+statement ok
+PRAGMA threads=4;
+
+# The reproduction from the issue
+statement ok
+CREATE TABLE t AS SELECT ST_Point(x, x) AS geom, {'xmin': x::DOUBLE} AS bbox FROM range(5000) r(x);
+
+statement ok
+CREATE INDEX t_rt ON t USING RTREE (geom);
+
+query II
+EXPLAIN SELECT count(*) FROM t WHERE bbox.xmin <= 20 AND ST_Intersects(geom, ST_MakeEnvelope(10, 10, 20, 20));
+----
+physical_plan	<REGEX>:.*FILTER.*RTREE_INDEX_SCAN.*
+
+query I
+SELECT count(*) FROM t WHERE bbox.xmin <= 20 AND ST_Intersects(geom, ST_MakeEnvelope(10, 10, 20, 20));
+----
+11
+
+# A GeoParquet 1.1 style bbox covering struct
+statement ok
+CREATE TABLE p AS SELECT range AS id, ST_Point(range % 100, range // 100) AS geom,
+	{'xmin': (range % 100)::DOUBLE, 'ymin': (range // 100)::DOUBLE,
+	 'xmax': (range % 100)::DOUBLE, 'ymax': (range // 100)::DOUBLE} AS bbox,
+	{'a': {'b': range}} AS nested
+FROM range(10000);
+
+statement ok
+CREATE TABLE p_noidx AS FROM p;
+
+statement ok
+CREATE INDEX p_rt ON p USING RTREE (geom);
+
+# Filters on multiple fields of the same struct
+query II
+EXPLAIN SELECT count(*) FROM p
+WHERE bbox.xmin <= 20 AND bbox.xmax >= 12 AND bbox.ymin <= 25 AND bbox.ymax >= 15
+	AND ST_Intersects(geom, ST_MakeEnvelope(10, 10, 30, 30));
+----
+physical_plan	<REGEX>:.*FILTER.*RTREE_INDEX_SCAN.*
+
+query I
+SELECT (SELECT list(id ORDER BY id) FROM p
+	WHERE bbox.xmin <= 20 AND bbox.xmax >= 12 AND bbox.ymin <= 25 AND bbox.ymax >= 15
+	AND ST_Intersects(geom, ST_MakeEnvelope(10, 10, 30, 30)))
+	= (SELECT list(id ORDER BY id) FROM p_noidx
+	WHERE bbox.xmin <= 20 AND bbox.xmax >= 12 AND bbox.ymin <= 25 AND bbox.ymax >= 15
+	AND ST_Intersects(geom, ST_MakeEnvelope(10, 10, 30, 30)));
+----
+true
+
+# Filter on a nested struct field
+query I
+SELECT (SELECT list(id ORDER BY id) FROM p WHERE nested.a.b % 3 = 0 AND ST_Intersects(geom, ST_MakeEnvelope(10, 10, 30, 30)))
+	= (SELECT list(id ORDER BY id) FROM p_noidx WHERE nested.a.b % 3 = 0 AND ST_Intersects(geom, ST_MakeEnvelope(10, 10, 30, 30)));
+----
+true
+
+# The filtered field is also projected
+query I
+SELECT (SELECT list((bbox.xmin, bbox.ymin) ORDER BY id) FROM p WHERE bbox.xmin <= 20 AND ST_Intersects(geom, ST_MakeEnvelope(10, 10, 30, 30)))
+	= (SELECT list((bbox.xmin, bbox.ymin) ORDER BY id) FROM p_noidx WHERE bbox.xmin <= 20 AND ST_Intersects(geom, ST_MakeEnvelope(10, 10, 30, 30)));
+----
+true
+
+# The whole struct is projected
+query I
+SELECT (SELECT list(bbox ORDER BY id) FROM p WHERE bbox.xmin <= 20 AND ST_Intersects(geom, ST_MakeEnvelope(10, 10, 30, 30)))
+	= (SELECT list(bbox ORDER BY id) FROM p_noidx WHERE bbox.xmin <= 20 AND ST_Intersects(geom, ST_MakeEnvelope(10, 10, 30, 30)));
+----
+true
+
+# ST_DWithin
+query I
+SELECT (SELECT list(id ORDER BY id) FROM p WHERE bbox.xmin <= 15 AND ST_DWithin(geom, ST_Point(15, 15), 3))
+	= (SELECT list(id ORDER BY id) FROM p_noidx WHERE bbox.xmin <= 15 AND ST_DWithin(geom, ST_Point(15, 15), 3));
+----
+true
+
+# Rows in transaction-local storage
+statement ok
+BEGIN;
+
+statement ok
+INSERT INTO p VALUES
+	(100000, ST_Point(15, 15), {'xmin': 15, 'ymin': 15, 'xmax': 15, 'ymax': 15}, {'a': {'b': 0}}),
+	(100001, ST_Point(15, 15), {'xmin': 25, 'ymin': 15, 'xmax': 25, 'ymax': 15}, {'a': {'b': 0}});
+
+query I
+SELECT id FROM p WHERE bbox.xmin <= 15 AND ST_Intersects(geom, ST_MakeEnvelope(14, 14, 16, 16)) ORDER BY id;
+----
+1414
+1415
+1514
+1515
+1614
+1615
+100000
+
+statement ok
+ROLLBACK;
+
+# Deferred-bounds index scan below a spatial join (the struct field filter is pulled up the same way)
+statement ok
+CREATE TABLE build (geom GEOMETRY);
+
+statement ok
+INSERT INTO build VALUES (ST_Point(50.5, 50.5));
+
+query II
+EXPLAIN SELECT count(*) FROM p JOIN build b ON ST_DWithin(p.geom, b.geom, 3.0) WHERE p.bbox.xmin <= 50;
+----
+physical_plan	<REGEX>:.*RTREE_INDEX_SCAN.*deferred.*
+
+query I
+SELECT (SELECT list(p.id ORDER BY p.id) FROM p JOIN build b ON ST_DWithin(p.geom, b.geom, 3.0) WHERE p.bbox.xmin <= 50)
+	= (SELECT list(p.id ORDER BY p.id) FROM p_noidx p JOIN build b ON ST_DWithin(p.geom, b.geom, 3.0) WHERE p.bbox.xmin <= 50);
+----
+true
+
+# Same, forced into the full-table-scan fallback (where the struct field filter only prunes row groups)
+statement ok
+SET rtree_index_scan_ratio = 0.0;
+
+statement ok
+SET rtree_index_scan_min_rows = 0;
+
+query I
+SELECT (SELECT list(p.id ORDER BY p.id) FROM p JOIN build b ON ST_DWithin(p.geom, b.geom, 3.0) WHERE p.bbox.xmin <= 50)
+	= (SELECT list(p.id ORDER BY p.id) FROM p_noidx p JOIN build b ON ST_DWithin(p.geom, b.geom, 3.0) WHERE p.bbox.xmin <= 50);
+----
+true

@@ -42,57 +42,81 @@ public:
 		optimize_function = RTreeIndexScanOptimizer::Optimize;
 	}
 
-	static void RewriteIndexExpression(const vector<column_t> &column_ids, LogicalGet &get, Expression &expr,
-	                                   bool &rewrite_possible) {
-		if (expr.GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
-			auto &bound_colref = expr.Cast<BoundColumnRefExpression>();
-			// bound column ref: rewrite to fit in the current set of bound column ids
-			bound_colref.BindingMutable().table_index = get.table_index;
-			auto &get_column_ids = get.GetColumnIds();
-			column_t referenced_column = column_ids[bound_colref.Binding().column_index];
-			// search for the referenced column in the set of column_ids
-			for (idx_t i = 0; i < get_column_ids.size(); i++) {
-				if (get_column_ids[i].GetPrimaryIndex() == referenced_column) {
-					bound_colref.BindingMutable().column_index = ProjectionIndex(i);
-					return;
-				}
-			}
-			// column id not found in bound columns in the LogicalGet: rewrite not possible
-			rewrite_possible = false;
+	//! Rewrite the index expression to refer to the columns of the given LogicalGet, so that it can be matched against
+	//! a filter expression on top of the get.
+	static bool RewriteIndexExpression(const IndexReadHandle<RTreeIndex> &index, const ColumnList &column_list,
+	                                   LogicalGet &get, unique_ptr<Expression> &index_expr) {
+		auto &indexed_columns = index->GetColumnIds();
+		if (indexed_columns.size() != 1) {
+			// Only single column indexes are supported right now
+			return false;
 		}
-		ExpressionIterator::EnumerateChildren(
-		    expr, [&](Expression &child) { RewriteIndexExpression(column_ids, get, child, rewrite_possible); });
+		auto &get_column_ids = get.GetColumnIds();
+
+		// If the get has the indexed struct field extract pushed down, the index expression is that extracted column
+		for (idx_t i = 0; i < get_column_ids.size(); i++) {
+			auto &column_id = get_column_ids[i];
+			if (column_id.IsPushdownExtract() && index->IsIndexedColumn(column_list, column_id)) {
+				index_expr = make_uniq<BoundColumnRefExpression>(column_id.GetScanType(),
+				                                                 ColumnBinding(get.table_index, ProjectionIndex(i)));
+				return true;
+			}
+		}
+
+		// Otherwise, the get has to scan the whole indexed column (not just extract fields from it).
+		// The index stores *physical* column ids, while the get's column ids are *logical*.
+		const auto indexed_column = column_list.GetColumn(PhysicalIndex(indexed_columns[0])).Logical().index;
+		for (idx_t i = 0; i < get_column_ids.size(); i++) {
+			auto &column_id = get_column_ids[i];
+			if (column_id.IsPushdownExtract() || column_id.GetPrimaryIndex() != indexed_column) {
+				continue;
+			}
+			ExpressionIterator::EnumerateExpression(index_expr, [&](Expression &expr) {
+				if (expr.GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
+					expr.Cast<BoundColumnRefExpression>().BindingMutable() =
+					    ColumnBinding(get.table_index, ProjectionIndex(i));
+				}
+			});
+			return true;
+		}
+		// The indexed column is not scanned by the get
+		return false;
 	}
 
-	static void RewriteIndexExpressionForFilter(const vector<column_t> &indexed_columns, LogicalGet &get,
-	                                            unique_ptr<Expression> &expr, const ColumnIndex &filter_idx,
-	                                            bool &rewrite_possible) {
-		if (expr->GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
-			auto &bound_colref = expr->Cast<BoundColumnRefExpression>();
-
-			if (indexed_columns.size() != 1) {
-				// Only single column indexes are supported right now
-				rewrite_possible = false;
-				return;
-			}
-
-			const auto &duck_table = get.GetTable()->Cast<DuckTableEntry>();
-			const auto &column_list = duck_table.GetColumns();
-
-			auto &col = column_list.GetColumn(LogicalIndex(indexed_columns[0]));
-			if (filter_idx.GetPrimaryIndex() != col.Physical().index) {
-				// RTree does not match the filter column
-				rewrite_possible = false;
-				return;
-			}
-
-			// this column matches the index column - turn it into a BoundReference
-			expr = make_uniq<BoundReferenceExpression>(bound_colref.GetReturnType(), 0ULL);
-			return;
+	//! Rewrite the index expression to refer to the input of a table filter on the given column, so that it can be
+	//! matched against the filter expression.
+	static bool RewriteIndexExpressionForFilter(const IndexReadHandle<RTreeIndex> &index, const ColumnList &column_list,
+	                                            const ColumnIndex &filter_idx, unique_ptr<Expression> &index_expr) {
+		auto &indexed_columns = index->GetColumnIds();
+		if (indexed_columns.size() != 1) {
+			// Only single column indexes are supported right now
+			return false;
 		}
-		ExpressionIterator::EnumerateChildren(*expr, [&](unique_ptr<Expression> &child) {
-			RewriteIndexExpressionForFilter(indexed_columns, get, child, filter_idx, rewrite_possible);
+
+		if (filter_idx.IsPushdownExtract()) {
+			// The filter applies to a struct field extracted by the scan, which only works if the index is built over
+			// that same field. The index expression then is the filter input itself.
+			if (!index->IsIndexedColumn(column_list, filter_idx)) {
+				return false;
+			}
+			index_expr = make_uniq<BoundReferenceExpression>(filter_idx.GetScanType(), 0ULL);
+			return true;
+		}
+
+		// The index stores *physical* column ids, while the filter column id is *logical*.
+		auto &col = column_list.GetColumn(PhysicalIndex(indexed_columns[0]));
+		if (filter_idx.GetPrimaryIndex() != col.Logical().index) {
+			// RTree does not match the filter column
+			return false;
+		}
+
+		// The filter applies to the indexed column - turn the references to it into a BoundReference
+		ExpressionIterator::EnumerateExpression(index_expr, [&](unique_ptr<Expression> &expr) {
+			if (expr->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
+				expr = make_uniq<BoundReferenceExpression>(expr->GetReturnType(), 0ULL);
+			}
 		});
+		return true;
 	}
 
 	static bool IsSpatialPredicate(const BoundScalarFunction &function, const unordered_set<string> &predicates) {
@@ -270,7 +294,9 @@ public:
 		for (const auto &entry : get.table_filters) {
 			auto index_ref = entry.GetIndex();
 			auto &column_id = get.GetColumnIndex(index_ref);
-			auto &type = get.returned_types[column_id.GetPrimaryIndex()];
+			// Use the scanned type of the column, which differs from the table column type if a struct field extract
+			// has been pushed down into the scan (the filter then applies to the extracted field)
+			auto &type = get.GetColumnType(column_id);
 			auto column = make_uniq<BoundColumnRefExpression>(type, ColumnBinding(get.table_index, index_ref));
 			new_filter->expressions.push_back(entry.Filter().ToExpression(*column));
 
@@ -317,18 +343,11 @@ public:
 				continue;
 			}
 			auto guard = index_entry->GetReadHandle<RTreeIndex>();
-			auto &indexed_columns = guard->GetColumnIds();
-			if (indexed_columns.size() != 1) {
-				continue;
-			}
-			// The index stores *physical* column ids, while the get's column ids are *logical*.
-			// These diverge when the table has generated columns, so convert before comparing.
-			const auto indexed_column =
-			    duck_table.GetColumns().PhysicalToLogical(PhysicalIndex(indexed_columns[0])).index;
-			// The indexed column must be scanned by this get, so that the pushed filter can refer to it
+			// The indexed column (or indexed struct field) must be scanned by this get, so that the pushed filter can
+			// refer to it. Note that a different field of the same struct column does not count.
 			bool found = false;
 			for (auto &col : get.GetColumnIds()) {
-				if (col.GetPrimaryIndex() == indexed_column) {
+				if (guard->IsIndexedColumn(duck_table.GetColumns(), col)) {
 					found = true;
 					break;
 				}
@@ -387,14 +406,11 @@ public:
 			auto guard = index_entry->GetReadHandle<RTreeIndex>();
 
 			// Create the bind data for this index given the bounding box
-			bool rewrite_possible = true;
 			auto index_expr = guard->CopyUnboundExpression(0);
-			auto indexed_columns = guard->GetColumnIds();
-			if (filter_column_idx) {
-				RewriteIndexExpressionForFilter(indexed_columns, get, index_expr, *filter_column_idx, rewrite_possible);
-			} else {
-				RewriteIndexExpression(indexed_columns, get, *index_expr, rewrite_possible);
-			}
+			const auto rewrite_possible =
+			    filter_column_idx
+			        ? RewriteIndexExpressionForFilter(guard, duck_table.GetColumns(), *filter_column_idx, index_expr)
+			        : RewriteIndexExpression(guard, duck_table.GetColumns(), get, index_expr);
 			if (!rewrite_possible) {
 				// Could not rewrite!
 				continue;
