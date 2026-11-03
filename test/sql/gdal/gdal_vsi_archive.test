@@ -1,0 +1,62 @@
+# name: test/sql/gdal/gdal_vsi_archive.test
+# description: the archive in an archive VSI path (/vsizip/<archive>/<member>) is opened
+#              through the DuckDB file system, like a plain path would be
+# group: [gdal]
+
+require spatial
+
+# amsterdam_roads_50.zip holds roads.geojson and nested/roads.{shp,shx,dbf,prj};
+# amsterdam_roads_50.tar.gz holds roads.geojson
+query I
+SELECT COUNT(*) FROM st_read('/vsizip/{WORKING_DIRECTORY}/test/data/vsi_archive/amsterdam_roads_50.zip/roads.geojson');
+----
+50
+
+# A shapefile finds its .shx/.dbf/.prj inside the archive
+query I
+SELECT COUNT(*) FROM st_read('/vsizip/{WORKING_DIRECTORY}/test/data/vsi_archive/amsterdam_roads_50.zip/nested/roads.shp');
+----
+50
+
+# Braced archive path
+query I
+SELECT COUNT(*) FROM st_read('/vsizip/{{WORKING_DIRECTORY}/test/data/vsi_archive/amsterdam_roads_50.zip}/roads.geojson');
+----
+50
+
+query I
+SELECT layers[1].feature_count FROM st_read_meta('/vsizip/{WORKING_DIRECTORY}/test/data/vsi_archive/amsterdam_roads_50.zip/nested/roads.shp');
+----
+50
+
+# Archives are handed to GDAL as stored: DuckDB must not gunzip the .tar.gz before
+# GDAL's tar reader does (plain "/vsigzip/" is covered by gdal_vsi.test)
+query I
+SELECT COUNT(*) FROM st_read('/vsitar/{WORKING_DIRECTORY}/test/data/vsi_archive/amsterdam_roads_50.tar.gz/roads.geojson');
+----
+50
+
+# Only the DuckDB file system expands '~' (from home_directory); GDAL's would look for a
+# directory literally named '~'. So this reads only if the archive goes through DuckDB.
+statement ok
+SET home_directory = '{WORKING_DIRECTORY}/test/data/vsi_archive';
+
+query I
+SELECT COUNT(*) FROM st_read('/vsizip/~/amsterdam_roads_50.zip/roads.geojson');
+----
+50
+
+# A missing archive reports the path as given, without the internal prefix
+statement error
+SELECT COUNT(*) FROM st_read('/vsizip/{WORKING_DIRECTORY}/test/data/vsi_archive/missing.zip/roads.geojson');
+----
+missing.zip
+
+# Still subject to enable_external_access, like every VSI path
+statement ok
+SET enable_external_access = false;
+
+statement error
+SELECT COUNT(*) FROM st_read('/vsizip/{WORKING_DIRECTORY}/test/data/vsi_archive/amsterdam_roads_50.zip/roads.geojson');
+----
+with VSI prefix: External access is disabled
