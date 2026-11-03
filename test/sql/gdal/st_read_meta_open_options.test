@@ -1,0 +1,35 @@
+# name: test/sql/gdal/st_read_meta_open_options.test
+# description: ST_Read_Meta takes open_options and allowed_drivers, like ST_Read
+# group: [gdal]
+
+require spatial
+
+# utf8_text_ansi_header.dbf holds UTF-8 text (field "Förderung", value "Baden-Württemberg")
+# but its language driver byte says ANSI (0x57) and there is no .cpg, so GDAL decodes it as
+# CP1252 unless told otherwise.
+query I
+SELECT layers[1].fields[3].name FROM st_read_meta('{WORKING_DIRECTORY}/test/data/shp_encoding/utf8_text_ansi_header.shp');
+----
+FÃ¶rderung
+
+query I
+SELECT layers[1].fields[3].name FROM st_read_meta('{WORKING_DIRECTORY}/test/data/shp_encoding/utf8_text_ansi_header.shp', open_options = ['ENCODING=UTF-8']);
+----
+Förderung
+
+# The names ST_Read_Meta reports with the option are the columns ST_Read returns with it
+query II
+SELECT LAND, "Förderung" FROM st_read('{WORKING_DIRECTORY}/test/data/shp_encoding/utf8_text_ansi_header.shp', open_options = ['ENCODING=UTF-8']);
+----
+Baden-Württemberg	x
+
+query I
+SELECT driver_short_name FROM st_read_meta('{WORKING_DIRECTORY}/test/data/shp_encoding/utf8_text_ansi_header.shp', allowed_drivers = ['ESRI Shapefile']);
+----
+ESRI Shapefile
+
+# A file no allowed driver can open is skipped, as files GDAL cannot open always are
+query I
+SELECT COUNT(*) FROM st_read_meta('{WORKING_DIRECTORY}/test/data/shp_encoding/utf8_text_ansi_header.shp', allowed_drivers = ['GeoJSON']);
+----
+0
