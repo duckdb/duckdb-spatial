@@ -48,7 +48,6 @@ jobs:
         main:
           config: extension_config.cmake
           toolchain: main
-      vcpkg_commit: cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3 # Release 2026.06.24
       exclude_archs: 'linux_amd64_musl'
       runners: ${{ needs.prepare.outputs.runners }}
 
