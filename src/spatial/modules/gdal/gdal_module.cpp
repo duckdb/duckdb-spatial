@@ -1275,7 +1275,7 @@ auto Statistics(ClientContext &context, const FunctionData *bind_data, column_t 
 			if ((geom_type >= 1) && (geom_type <= 7) && (vert_type >= 0) && (vert_type <= 3)) {
 				auto &types = GeometryStats::GetTypes(stats);
 				types.Clear();
-				types.AddWKBType(static_cast<int32_t>(geom_type));
+				types.TryAddWKBType(static_cast<int32_t>(geom_type));
 			}
 
 			return stats.ToUnique();
