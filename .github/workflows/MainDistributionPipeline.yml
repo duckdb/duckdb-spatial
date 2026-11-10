@@ -41,10 +41,9 @@ jobs:
   build:
     name: Build extension
     needs: prepare
-    uses: duckdb/extension-ci-tools/.github/workflows/build.yml@ae971e03c1840a1c6c2d81b91d1ec851f297f720 # v2.0-cyanoptera 2026-11-06 pin
+    uses: duckdb/extension-ci-tools/.github/workflows/build.yml@main
     with:
       duckdb_version: 925bcdf35756dca26ada5228a0c76dc227c5aca5 # v2.0.0 RC
-      ci_tools_version: ae971e03c1840a1c6c2d81b91d1ec851f297f720 # v2.0-cyanoptera 2026-11-06 pin
       groups: |
         main:
           config: extension_config.cmake
@@ -57,12 +56,11 @@ jobs:
     name: Deploy extension
     if: ${{ startsWith(github.ref, 'refs/heads/v') || github.ref == 'refs/heads/main' }}
     needs: build
-    uses: duckdb/extension-ci-tools/.github/workflows/deploy.yml@ae971e03c1840a1c6c2d81b91d1ec851f297f720 # v2.0-cyanoptera 2026-11-06 pin
+    uses: duckdb/extension-ci-tools/.github/workflows/deploy.yml@main
     secrets: inherit
     with:
       duckdb_version: ${{ needs.build.outputs.duckdb_version }}
       duckdb_commit: ${{ needs.build.outputs.duckdb_commit }}
-      ci_tools_version: ae971e03c1840a1c6c2d81b91d1ec851f297f720 # v2.0-cyanoptera 2026-11-06 pin
       deploy_extensions: spatial
       deploy_latest: ${{ startsWith(github.ref, 'refs/heads/v') || github.ref == 'refs/heads/main' }}
 
