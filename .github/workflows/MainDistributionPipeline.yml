@@ -25,10 +25,10 @@ concurrency:
 jobs:
   duckdb-latest-build:
     name: Build extension binaries
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@969bc76276acec1c0a3922ff500d2ec3a1a3b037 # v2.0-cyanoptera 2026-10-01 pin
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@ae971e03c1840a1c6c2d81b91d1ec851f297f720 # v2.0-cyanoptera 2026-11-06 pin
     with:
-      duckdb_version: d54cbbe3df17e8e5ce68312f483b4155836112aa # v2.0.0 RC
-      ci_tools_version: 969bc76276acec1c0a3922ff500d2ec3a1a3b037 # v2.0-cyanoptera 2026-10-01 pin
+      duckdb_version: a7e6fc10d2f12ba0784f0843ee9ec517dcba561b # v2.0.0 RC
+      ci_tools_version: ae971e03c1840a1c6c2d81b91d1ec851f297f720 # v2.0-cyanoptera 2026-11-06 pin
       extension_name: spatial
       vcpkg_commit: cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3 # Release 2026.06.24
       exclude_archs: 'linux_amd64_musl'
@@ -36,11 +36,11 @@ jobs:
   duckdb-latest-deploy:
     name: Deploy extension binaries
     needs: duckdb-latest-build
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_deploy.yml@969bc76276acec1c0a3922ff500d2ec3a1a3b037 # v2.0-cyanoptera 2026-10-01 pin
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_deploy.yml@ae971e03c1840a1c6c2d81b91d1ec851f297f720 # v2.0-cyanoptera 2026-11-06 pin
     secrets: inherit
     with:
-      duckdb_version: d54cbbe3df17e8e5ce68312f483b4155836112aa # v2.0.0 RC
-      ci_tools_version: 969bc76276acec1c0a3922ff500d2ec3a1a3b037 # v2.0-cyanoptera 2026-10-01 pin
+      duckdb_version: a7e6fc10d2f12ba0784f0843ee9ec517dcba561b # v2.0.0 RC
+      ci_tools_version: ae971e03c1840a1c6c2d81b91d1ec851f297f720 # v2.0-cyanoptera 2026-11-06 pin
       extension_name: spatial
       deploy_latest: ${{ startsWith(github.ref, 'refs/heads/v') || github.ref == 'refs/heads/main' }}
       exclude_archs: 'linux_amd64_musl'
