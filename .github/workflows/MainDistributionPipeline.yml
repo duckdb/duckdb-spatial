@@ -48,7 +48,6 @@ jobs:
         main:
           config: extension_config.cmake
           toolchain: main
-      vcpkg_commit: 84bab45d415d22042bd0b9081aea57f362da3f35
       exclude_archs: 'linux_amd64_musl'
       runners: ${{ needs.prepare.outputs.runners }}
 
