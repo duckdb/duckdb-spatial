@@ -44,7 +44,6 @@ jobs:
     uses: duckdb/extension-ci-tools/.github/workflows/build.yml@main
     with:
       duckdb_version: main
-      ci_tools_version: main
       groups: |
         main:
           config: extension_config.cmake
@@ -62,7 +61,6 @@ jobs:
     with:
       duckdb_version: ${{ needs.build.outputs.duckdb_version }}
       duckdb_commit: ${{ needs.build.outputs.duckdb_commit }}
-      ci_tools_version: main
       deploy_extensions: spatial
       deploy_latest: ${{ startsWith(github.ref, 'refs/heads/v') || github.ref == 'refs/heads/main' }}
 
