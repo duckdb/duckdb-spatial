@@ -19,7 +19,7 @@ static constexpr idx_t RTREE_INDEX_SCAN_MIN_ROWS_DEFAULT = 8192;
 
 bool SpatialSettings::AlwaysXY(ClientContext &context, bool &is_set) {
 	Value value;
-	if (context.TryGetCurrentSetting(GEOMETRY_ALWAYS_XY, value)) {
+	if (context.TryGetCurrentSetting(GEOMETRY_ALWAYS_XY, value) && !value.IsNull()) {
 		is_set = true;
 		return value.GetValue<bool>();
 	}

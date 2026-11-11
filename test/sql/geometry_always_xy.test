@@ -64,3 +64,12 @@ SELECT ST_Transform(ST_Point(0, 0), 'EPSG:4326', 'EPSG:3857');
 
 statement ok
 COPY (SELECT ST_Point(0, 0) as geom) TO '{TEST_DIR}/always_xy.kml' WITH (FORMAT GDAL, DRIVER 'KML', SRS 'EPSG:4326');
+
+# RESET stores the setting's default, NULL, as the session value, which counts as not set
+statement ok
+RESET geometry_always_xy;
+
+statement error
+SELECT ST_Distance_Sphere(ST_Point(0, 0), ST_Point(1, 1));
+----
+Invalid Configuration Error: The 'ST_Distance_Sphere' function is sensitive to the coordinate axis order
