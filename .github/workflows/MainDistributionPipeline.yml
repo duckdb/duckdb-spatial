@@ -43,7 +43,6 @@ jobs:
     needs: prepare
     uses: duckdb/extension-ci-tools/.github/workflows/build.yml@main
     with:
-      duckdb_version: 925bcdf35756dca26ada5228a0c76dc227c5aca5 # v2.0.0 RC
       groups: |
         main:
           config: extension_config.cmake
