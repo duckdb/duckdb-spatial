@@ -22,28 +22,46 @@ concurrency:
   cancel-in-progress: true
 
 
+permissions:
+  actions: read
+  contents: read
+  packages: read
+
 jobs:
-  duckdb-latest-build:
-    name: Build extension binaries
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@c286b12cee2aa16b714e76d0b46e530fcdb6dc05 # v2.0-cyanoptera 2026-11-11 pin
+  prepare:
+    name: Prepare
+    runs-on: ${{ github.repository_owner == 'duckdb' && 'namespace-profile-linux-slim' || 'ubuntu-slim' }}
+    outputs:
+      runners: ${{ steps.runners.outputs.runners }}
+    steps:
+      - name: Detect runners
+        id: runners
+        uses: duckdb/duckdb-ci/detect-runners@main
+
+  build:
+    name: Build extension
+    needs: prepare
+    uses: duckdb/extension-ci-tools/.github/workflows/build.yml@main
     with:
       duckdb_version: 925bcdf35756dca26ada5228a0c76dc227c5aca5 # v2.0.0 RC
-      ci_tools_version: c286b12cee2aa16b714e76d0b46e530fcdb6dc05 # v2.0-cyanoptera 2026-11-11 pin
-      extension_name: spatial
-      vcpkg_commit: cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3 # Release 2026.06.24
+      groups: |
+        main:
+          config: extension_config.cmake
+          toolchain: main
       exclude_archs: 'linux_amd64_musl'
+      runners: ${{ needs.prepare.outputs.runners }}
 
-  duckdb-latest-deploy:
-    name: Deploy extension binaries
-    needs: duckdb-latest-build
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_deploy.yml@c286b12cee2aa16b714e76d0b46e530fcdb6dc05 # v2.0-cyanoptera 2026-11-11 pin
+  deploy:
+    name: Deploy extension
+    if: ${{ startsWith(github.ref, 'refs/heads/v') || github.ref == 'refs/heads/main' }}
+    needs: build
+    uses: duckdb/extension-ci-tools/.github/workflows/deploy.yml@main
     secrets: inherit
     with:
-      duckdb_version: 925bcdf35756dca26ada5228a0c76dc227c5aca5 # v2.0.0 RC
-      ci_tools_version: c286b12cee2aa16b714e76d0b46e530fcdb6dc05 # v2.0-cyanoptera 2026-11-11 pin
-      extension_name: spatial
+      duckdb_version: ${{ needs.build.outputs.duckdb_version }}
+      duckdb_commit: ${{ needs.build.outputs.duckdb_commit }}
+      deploy_extensions: spatial
       deploy_latest: ${{ startsWith(github.ref, 'refs/heads/v') || github.ref == 'refs/heads/main' }}
-      exclude_archs: 'linux_amd64_musl'
 
   relassert:
     name: Build relassert
