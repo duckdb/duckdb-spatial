@@ -7,6 +7,8 @@
 
 namespace duckdb {
 
+static constexpr auto SPATIAL_JOIN_PREPARED_CACHE_SIZE = "spatial_join_prepared_cache_size";
+static constexpr idx_t SPATIAL_JOIN_PREPARED_CACHE_SIZE_DEFAULT = 32ULL * 1024 * 1024;
 static constexpr auto GEOMETRY_ALWAYS_XY = "geometry_always_xy";
 static constexpr auto RTREE_INDEX_SCAN_RATIO = "rtree_index_scan_ratio";
 // Benchmarks (2M uniform points/small polygons, payload columns projected, warm cache) put the
@@ -67,6 +69,14 @@ idx_t SpatialSettings::RTreeIndexScanMinRows(ClientContext &context) {
 	return RTREE_INDEX_SCAN_MIN_ROWS_DEFAULT;
 }
 
+idx_t SpatialSettings::JoinPreparedCacheSize(ClientContext &context) {
+	Value value;
+	if (context.TryGetCurrentSetting(SPATIAL_JOIN_PREPARED_CACHE_SIZE, value) && !value.IsNull()) {
+		return value.GetValue<uint64_t>();
+	}
+	return SPATIAL_JOIN_PREPARED_CACHE_SIZE_DEFAULT;
+}
+
 void SpatialSettings::Register(ExtensionLoader &loader) {
 
 	auto &db = loader.GetDatabaseInstance();
@@ -75,6 +85,11 @@ void SpatialSettings::Register(ExtensionLoader &loader) {
 	                             "ignore the defined axis order of coordinate reference systems and always treat them "
 	                             "as (easting, northing) instead of e.g. (latitude, longitude)",
 	                             LogicalType::BOOLEAN, Value(LogicalTypeId::BOOLEAN));
+
+	db.config.AddExtensionOption(SPATIAL_JOIN_PREPARED_CACHE_SIZE,
+	                             "serialized bytes of build-side geometries each spatial join thread keeps prepared "
+	                             "(0 evaluates the join predicate without preparing the build side)",
+	                             LogicalType::UBIGINT, Value::UBIGINT(SPATIAL_JOIN_PREPARED_CACHE_SIZE_DEFAULT));
 
 	db.config.AddExtensionOption(
 	    RTREE_INDEX_SCAN_RATIO,
