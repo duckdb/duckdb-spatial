@@ -304,8 +304,11 @@ private:
 
 class DuckDBFileSystemHandler final : public VSIFilesystemHandler {
 public:
-	DuckDBFileSystemHandler(string client_prefix, ClientContext &context)
-	    : client_prefix(std::move(client_prefix)), context(context) {};
+	// `compression`: how files are opened. AUTO_DETECT for plain paths, so "data.geojson.gz" reads
+	// as GeoJSON; UNCOMPRESSED for the archive of an archive VSI path ("/vsigzip/", "/vsitar/"
+	// on a .tar.gz, ...), where GDAL decompresses and must see the bytes as stored.
+	DuckDBFileSystemHandler(string client_prefix, ClientContext &context, FileCompressionType compression)
+	    : client_prefix(std::move(client_prefix)), context(context), compression(compression) {};
 
 	const char *StripPrefix(const char *pszFilename) const {
 		return pszFilename + client_prefix.size();
@@ -362,7 +365,7 @@ public:
 		}
 
 		try {
-			auto file = fs.OpenFile(real_file_path, flags | FileCompressionType::AUTO_DETECT);
+			auto file = fs.OpenFile(real_file_path, flags | compression);
 			return VSIVirtualHandleUniquePtr(new DuckDBFileHandle(std::move(file)));
 
 		} catch (std::exception &ex) {
@@ -411,8 +414,8 @@ public:
 				    return 0;
 			    }
 
-			    if (!(fs.FileExists(real_file_path) ||
-			          (!FileSystem::IsRemoteFile(real_file_path) && fs.DirectoryExists(real_file_path)))) {
+			    const auto is_file = fs.FileExists(real_file_path);
+			    if (!(is_file || (!FileSystem::IsRemoteFile(real_file_path) && fs.DirectoryExists(real_file_path)))) {
 				    return -1;
 			    }
 
@@ -426,7 +429,7 @@ public:
 			    FileOpenFlags flags;
 			    flags |= FileFlags::FILE_FLAGS_READ;
 			    flags |= FileFlags::FILE_FLAGS_NULL_IF_NOT_EXISTS;
-			    flags |= FileCompressionType::AUTO_DETECT;
+			    flags |= compression;
 
 			    const auto file = fs.OpenFile(real_file_path, flags);
 			    if (!file) {
@@ -454,8 +457,11 @@ public:
 					    result->st_mode = S_IFCHR;
 					    break;
 				    default:
-					    // HTTPFS returns invalid type for everything basically.
-					    if (FileSystem::IsRemoteFile(real_file_path)) {
+					    // HTTPFS returns invalid type for everything basically, and so does any file system
+					    // that does not implement GetFileType (DuckDB-Wasm's, for registered files). A path
+					    // FileExists accepted is a regular file: GDAL's archive handlers stat the archive
+					    // before opening it, and would otherwise report it missing.
+					    if (is_file || FileSystem::IsRemoteFile(real_file_path)) {
 						    result->st_mode = S_IFREG;
 					    } else {
 						    return -1;
@@ -588,6 +594,7 @@ public:
 private:
 	string client_prefix;
 	ClientContext &context;
+	FileCompressionType compression;
 };
 
 class DuckDBFileSystemPrefix final : public ClientContextState {
@@ -607,11 +614,18 @@ public:
 		client_prefix = StringUtil::Format("/vsiduckdb-%s/", UUID::ToString(UUID::GenerateRandomUUID()));
 
 		// Create a new file handler responding to this prefix
-		fs_handler = make_uniq<DuckDBFileSystemHandler>(client_prefix, context);
+		fs_handler = make_uniq<DuckDBFileSystemHandler>(client_prefix, context, FileCompressionType::AUTO_DETECT);
 
-		// Register the file handler
+		// And one that serves archives to GDAL's archive handlers as stored (see AddArchivePrefix).
+		// Same "/vsiduckdb-<uuid>/" shape, so CleanGDALMessage strips it too.
+		archive_prefix = StringUtil::Format("/vsiduckdb-%s/", UUID::ToString(UUID::GenerateRandomUUID()));
+		archive_fs_handler =
+		    make_uniq<DuckDBFileSystemHandler>(archive_prefix, context, FileCompressionType::UNCOMPRESSED);
+
+		// Register the file handlers
 		lock_guard<mutex> lock(GetVSIMutex());
 		VSIFileManager::InstallHandler(client_prefix, fs_handler.get());
+		VSIFileManager::InstallHandler(archive_prefix, archive_fs_handler.get());
 	}
 
 	// Delete copy
@@ -622,6 +636,7 @@ public:
 		// Uninstall the file handler for this prefix
 		lock_guard<mutex> lock(GetVSIMutex());
 		VSIFileManager::RemoveHandler(client_prefix);
+		VSIFileManager::RemoveHandler(archive_prefix);
 	}
 
 	// Check if a path looks like a GDAL driver-prefixed URL (e.g., "WFS:https://...", "OAPIF:https://...")
@@ -644,13 +659,45 @@ public:
 		return StringUtil::StartsWith(rest, "http://") || StringUtil::StartsWith(rest, "https://");
 	}
 
-	string AddPrefix(const string &value) const {
+	// GDAL handlers that read a member out of another file: "/vsizip/<archive>/<member>",
+	// or "/vsizip/{<archive>}/<member>" when the archive path is ambiguous.
+	static constexpr const char *ARCHIVE_VSI_PREFIXES[] = {"/vsizip/", "/vsitar/", "/vsigzip/", "/vsi7z/",
+	                                                       "/vsirar/"};
+
+	// Route the archive inside an archive VSI path through the DuckDB file system, so that
+	// "/vsizip/data.zip/a.shp" opens "data.zip" with the same file system as "data.zip" alone
+	// would: files registered with DuckDB-Wasm (which GDAL's own file system cannot see),
+	// httpfs URLs, and so on. The archive is served as stored, not auto-decompressed, since
+	// GDAL does that itself. Archives that are themselves VSI paths ("/vsizip//vsis3/...")
+	// are left to GDAL.
+	string AddArchivePrefix(const string &value) const {
+		for (const auto vsi_prefix : ARCHIVE_VSI_PREFIXES) {
+			if (!StringUtil::StartsWith(value, vsi_prefix)) {
+				continue;
+			}
+			auto inner = value.substr(strlen(vsi_prefix));
+			const auto braced = StringUtil::StartsWith(inner, "{");
+			if (braced) {
+				inner = inner.substr(1);
+			}
+			if (inner.empty() || StringUtil::StartsWith(inner, "/vsi")) {
+				return value;
+			}
+			return string(vsi_prefix) + (braced ? "{" : "") + archive_prefix + inner;
+		}
+		return value;
+	}
+
+	// `wrap_archives`: whether to route the archive of an archive VSI path through DuckDB (see
+	// AddArchivePrefix). Only for reading; GDAL writes archives with seeks the DuckDB handler
+	// is not meant for.
+	string AddPrefix(const string &value, bool wrap_archives = true) const {
 		// If the user explicitly asked for a VSI prefix, we don't add our own
 		if (StringUtil::StartsWith(value, "/vsi")) {
 			if (!Settings::Get<EnableExternalAccessSetting>(context)) {
 				throw PermissionException("Cannot open file '%s' with VSI prefix: External access is disabled", value);
 			}
-			return value;
+			return wrap_archives ? AddArchivePrefix(value) : value;
 		}
 		// If the path is a GDAL driver-prefixed URL (e.g., "WFS:https://..."), pass it through directly
 		if (IsGDALDriverPrefixedURL(value)) {
@@ -671,6 +718,8 @@ private:
 	ClientContext &context;
 	string client_prefix;
 	unique_ptr<DuckDBFileSystemHandler> fs_handler;
+	string archive_prefix;
+	unique_ptr<DuckDBFileSystemHandler> archive_fs_handler;
 };
 
 //======================================================================================================================
@@ -1696,7 +1745,7 @@ auto InitGlobal(ClientContext &context, FunctionData &bdata_p, const string &rea
 	}
 
 	const auto &file_prefix = DuckDBFileSystemPrefix::GetOrCreate(context);
-	const auto gdal_file_path = file_prefix.AddPrefix(real_file_path);
+	const auto gdal_file_path = file_prefix.AddPrefix(real_file_path, false);
 
 	result->file_path = real_file_path;
 
