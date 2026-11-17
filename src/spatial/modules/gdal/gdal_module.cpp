@@ -2068,6 +2068,10 @@ namespace gdal_meta {
 class BindData final : public TableFunctionData {
 public:
 	vector<OpenFileInfo> files;
+	// Same meaning as in ST_Read: GDAL open options (e.g. "ENCODING=UTF-8" for a shapefile whose .dbf
+	// is not in the encoding its header declares) and the drivers GDAL may try.
+	CPLStringList dataset_options;
+	CPLStringList dataset_drivers;
 };
 
 LogicalType GetGeometryFieldType() {
@@ -2140,6 +2144,20 @@ auto Bind(ClientContext &context, TableFunctionBindInput &input, vector<LogicalT
 		const auto mf_reader = MultiFileReader::Create(input.table_function);
 		const auto mf_inputs = mf_reader->CreateFileList(context, input_val, FileGlobOptions::ALLOW_EMPTY);
 		result->files = mf_inputs->GetAllFiles();
+	}
+
+	const auto dataset_options_param = input.named_parameters.find("open_options");
+	if (dataset_options_param != input.named_parameters.end()) {
+		for (auto &param : ListValue::GetChildren(dataset_options_param->second)) {
+			result->dataset_options.AddString(StringValue::Get(param).c_str());
+		}
+	}
+
+	const auto drivers_param = input.named_parameters.find("allowed_drivers");
+	if (drivers_param != input.named_parameters.end()) {
+		for (auto &param : ListValue::GetChildren(drivers_param->second)) {
+			result->dataset_drivers.AddString(StringValue::Get(param).c_str());
+		}
 	}
 
 	return std::move(result);
@@ -2249,8 +2267,9 @@ void Scan(ClientContext &context, TableFunctionInput &input, DataChunk &output) 
 
 		GDALDatasetUniquePtr dataset;
 		try {
-			dataset = GDALDatasetUniquePtr(
-			    GDALDataset::Open(prefixed_file_name.c_str(), GDAL_OF_VECTOR | GDAL_OF_VERBOSE_ERROR));
+			dataset = GDALDatasetUniquePtr(GDALDataset::FromHandle(
+			    GDALOpenEx(prefixed_file_name.c_str(), GDAL_OF_VECTOR | GDAL_OF_VERBOSE_ERROR, bdata.dataset_drivers,
+			               bdata.dataset_options, nullptr)));
 		} catch (...) {
 			// Just skip anything we cant open
 			continue;
@@ -2290,8 +2309,12 @@ static constexpr auto EXAMPLE = R"(
 	)";
 
 static void Register(ExtensionLoader &loader) {
-	const TableFunction func("ST_Read_Meta", FunctionSignature().AddPositionalOnly("path", LogicalType::VARCHAR), Scan,
-	                         Bind, InitGlobal);
+	FunctionSignature signature;
+	signature.AddPositionalOnly("path", LogicalType::VARCHAR).WithTypedKwargs("options", [&](TypedKwargs &options) {
+		options.Add("open_options", LogicalType::LIST(LogicalType::VARCHAR))
+		    .Add("allowed_drivers", LogicalType::LIST(LogicalType::VARCHAR));
+	});
+	const TableFunction func("ST_Read_Meta", std::move(signature), Scan, Bind, InitGlobal);
 	loader.RegisterFunction(MultiFileReader::CreateFunctionSet(func));
 
 	InsertionOrderPreservingMap<string> tags;
