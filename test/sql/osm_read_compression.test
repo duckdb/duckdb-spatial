@@ -1,0 +1,13 @@
+# name: test/sql/osm_read_compression.test
+# description: Read interleaved raw, zlib, LZ4 and Zstandard OSMData blocks.
+# group: [sql]
+
+require spatial
+
+query IT
+SELECT id, tags['codec'] FROM ST_ReadOSM('test/data/osm_mixed_compression.osm.pbf') ORDER BY id;
+----
+1	raw
+2	zlib
+3	lz4
+4	zstd
