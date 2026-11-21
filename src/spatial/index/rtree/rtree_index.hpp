@@ -23,15 +23,10 @@ public:
 public:
 	RTreeIndex(const Identifier &name, IndexConstraintType index_constraint_type, const vector<column_t> &column_ids,
 	           TableIOManager &table_io_manager, const vector<unique_ptr<Expression>> &unbound_expressions,
-	           AttachedDatabase &db, const case_insensitive_map_t<Value> &options, ClientContext &context,
+	           AttachedDatabase &db, const case_insensitive_map_t<Value> &options,
 	           const IndexStorageInfo &info = IndexStorageInfo(), idx_t estimated_cardinality = 0);
 
 	unique_ptr<RTree> tree;
-
-	// To compute bounding boxes when inserting
-	DataChunk key_chunk;
-	unique_ptr<Expression> key_expr;
-	unique_ptr<ExpressionExecutor> key_executor;
 
 	unique_ptr<IndexScanState> InitializeScan(const Box2D<float> &query) const;
 	idx_t Scan(IndexScanState &state, Vector &result) const;
@@ -58,8 +53,7 @@ public:
 
 	static unique_ptr<BoundIndex> Create(CreateIndexInput &input) {
 		auto res = make_uniq<RTreeIndex>(input.name, input.constraint_type, input.column_ids, input.table_io_manager,
-		                                 input.unbound_expressions, input.db, input.options, input.context,
-		                                 input.storage_info);
+		                                 input.unbound_expressions, input.db, input.options, input.storage_info);
 		return std::move(res);
 	}
 
