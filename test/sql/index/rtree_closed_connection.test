@@ -1,0 +1,69 @@
+# name: test/sql/index/rtree_closed_connection.test
+# description: Inserts and deletes must keep working after the connection that created or bound an R-tree index is
+#              closed, which 'reconnect' does (#915). The failure depends on memory reuse, so this test only catches
+#              it reliably under AddressSanitizer.
+# group: [index]
+
+require spatial
+
+load __TEST_DIR__/rtree_closed_connection.db
+
+statement ok
+SET profiling_renderer_settings = MAP {'operator_casing': 'upper'};
+
+statement ok
+CREATE TABLE t AS SELECT i AS id, ST_Point(i, i)::GEOMETRY AS geom FROM range(1000) r(i);
+
+# Index created on a connection that is then closed
+statement ok
+CREATE INDEX idx ON t USING RTREE (geom);
+
+reconnect
+
+statement ok
+INSERT INTO t SELECT i AS id, ST_Point(i, i)::GEOMETRY FROM range(1000, 1010) r(i);
+
+statement ok
+DELETE FROM t WHERE id < 20;
+
+query I
+SELECT count(*) FROM rtree_index_dump('idx') WHERE row_id IS NOT NULL;
+----
+990
+
+statement ok
+CHECKPOINT;
+
+# Persisted index bound lazily by a scan on a connection that is then closed
+restart
+
+statement ok
+SET profiling_renderer_settings = MAP {'operator_casing': 'upper'};
+
+query II
+EXPLAIN SELECT count(*) FROM t WHERE ST_Intersects(geom, ST_MakeEnvelope(0, 0, 50, 50));
+----
+physical_plan	<REGEX>:.*RTREE_INDEX_SCAN.*
+
+query I
+SELECT count(*) FROM t WHERE ST_Intersects(geom, ST_MakeEnvelope(0, 0, 50, 50));
+----
+31
+
+reconnect
+
+statement ok
+INSERT INTO t SELECT i AS id, ST_Point(i, i)::GEOMETRY FROM range(1010, 1020) r(i);
+
+statement ok
+DELETE FROM t WHERE id < 40;
+
+query I
+SELECT count(*) FROM rtree_index_dump('idx') WHERE row_id IS NOT NULL;
+----
+980
+
+query I
+SELECT count(*) FROM t WHERE ST_Intersects(geom, ST_MakeEnvelope(0, 0, 50, 50));
+----
+11

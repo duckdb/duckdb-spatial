@@ -1,13 +1,8 @@
-#include "duckdb/common/vector/map_vector.hpp"
-#include "duckdb/common/vector/struct_vector.hpp"
 #include "spatial/index/rtree/rtree_index.hpp"
 
-#include "duckdb/catalog/catalog.hpp"
-#include "duckdb/catalog/catalog_entry/scalar_function_catalog_entry.hpp"
 #include "duckdb/function/scalar/struct_utils.hpp"
 #include "duckdb/parser/column_list.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
-#include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/common/serializer/binary_deserializer.hpp"
 #include "duckdb/common/serializer/binary_serializer.hpp"
 #include "duckdb/execution/index/fixed_size_allocator.hpp"
@@ -82,8 +77,8 @@ static RTreeConfig ParseOptions(const case_insensitive_map_t<Value> &options) {
 RTreeIndex::RTreeIndex(const Identifier &name, IndexConstraintType index_constraint_type,
                        const vector<column_t> &column_ids, TableIOManager &table_io_manager,
                        const vector<unique_ptr<Expression>> &unbound_expressions, AttachedDatabase &db,
-                       const case_insensitive_map_t<Value> &options, ClientContext &context,
-                       const IndexStorageInfo &info, idx_t estimated_cardinality)
+                       const case_insensitive_map_t<Value> &options, const IndexStorageInfo &info,
+                       idx_t estimated_cardinality)
     : BoundIndex(Identifier(name), TYPE_NAME, index_constraint_type, column_ids, table_io_manager, unbound_expressions,
                  db) {
 
@@ -114,22 +109,6 @@ RTreeIndex::RTreeIndex(const Identifier &name, IndexConstraintType index_constra
 		// Set the root node and recalculate the bounds
 		tree->SetRoot(info.root);
 	}
-
-	// Construct the key expression executor
-	auto &source_type = unbound_expressions[0]->GetReturnType();
-	auto &catalog = Catalog::GetSystemCatalog(context);
-	auto &entry = catalog.GetEntry<ScalarFunctionCatalogEntry>(
-	    context, QualifiedName(catalog.GetName(), Identifier::DefaultSchema(), "ST_Extent_Approx"));
-	const auto &func = *entry.functions.GetFunctionByArguments(context, {source_type});
-	auto child_expr = make_uniq<BoundReferenceExpression>(source_type, 0);
-
-	vector<unique_ptr<Expression>> children;
-	children.push_back(std::move(child_expr));
-
-	key_expr = func.Bind(context, std::move(children));
-	key_executor = make_uniq<ExpressionExecutor>(context);
-	key_executor->AddExpression(*key_expr);
-	key_chunk.Initialize(context, {GeoTypes::BOX_2DF()});
 }
 
 unique_ptr<IndexScanState> RTreeIndex::InitializeScan(const RTreeBounds &query) const {
@@ -311,30 +290,26 @@ void RTreeIndex::ResetStorage(IndexLock &index_lock) {
 	tree->Reset();
 }
 
+//! Converts geometries to index entries from their cached bounds, as ST_Extent_Approx does, skipping NULL and empty
+//! geometries. Looking up and binding ST_Extent_Approx needs a ClientContext, which the index outlives.
 template <class CALLBACK = std::function<void(const RTreeEntry &)>>
-static void ConvertToEntries(Vector &box_vec, Vector &rowid_vec, idx_t count, CALLBACK &&callback) {
-	const auto &box_validity = FlatVector::Validity(box_vec);
-
-	auto &box_entries = StructVector::GetEntries(box_vec);
-	const auto box_xmin_data = FlatVector::GetData<float>(box_entries[0]);
-	const auto box_ymin_data = FlatVector::GetData<float>(box_entries[1]);
-	const auto box_xmax_data = FlatVector::GetData<float>(box_entries[2]);
-	const auto box_ymax_data = FlatVector::GetData<float>(box_entries[3]);
+static void ConvertToEntries(Vector &geom_vec, Vector &rowid_vec, idx_t count, CALLBACK &&callback) {
+	UnifiedVectorFormat geom_format;
+	geom_vec.ToUnifiedFormat(geom_format);
+	const auto geom_data = UnifiedVectorFormat::GetData<string_t>(geom_format);
 
 	// The row ids are not necessarily flat (e.g. when replaying appends and deletes from the WAL)
 	const auto row_ids = rowid_vec.Values<row_t>();
 
 	for (idx_t i = 0; i < count; i++) {
 		const auto row_entry = row_ids[i];
-		if (!box_validity.RowIsValid(i) || !row_entry.IsValid()) {
-			continue;
-		}
+		const auto geom_idx = geom_format.sel->get_index(i);
 
 		Box2D<float> box;
-		box.min.x = box_xmin_data[i];
-		box.min.y = box_ymin_data[i];
-		box.max.x = box_xmax_data[i];
-		box.max.y = box_ymax_data[i];
+		if (!row_entry.IsValid() || !geom_format.validity.RowIsValid(geom_idx) ||
+		    !Serde::TryGetBounds(geom_data[geom_idx], box)) {
+			continue;
+		}
 
 		RTreeEntry new_entry = {RTree::MakeRowId(row_entry.GetValue()), box};
 
@@ -344,15 +319,7 @@ static void ConvertToEntries(Vector &box_vec, Vector &rowid_vec, idx_t count, CA
 }
 
 ErrorData RTreeIndex::Insert(IndexLock &lock, DataChunk &input, Vector &row_vec) {
-	const auto count = input.size();
-
-	key_chunk.Reset();
-	key_executor->ExecuteExpression(input, key_chunk.data[0]);
-	key_chunk.Flatten();
-
-	auto &box_vec = key_chunk.data[0];
-
-	ConvertToEntries(box_vec, row_vec, count, [&](const RTreeEntry &entry) { tree->Insert(entry); });
+	ConvertToEntries(input.data[0], row_vec, input.size(), [&](const RTreeEntry &entry) { tree->Insert(entry); });
 
 	return ErrorData {};
 }
@@ -365,18 +332,11 @@ ErrorData RTreeIndex::Append(IndexLock &lock, DataChunk &appended_data, Vector &
 }
 
 void RTreeIndex::Delete(IndexLock &lock, DataChunk &input, Vector &row_vec) {
-	const auto count = input.size();
-
 	DataChunk expr_chunk;
 	expr_chunk.Initialize(Allocator::DefaultAllocator(), logical_types);
 	ExecuteExpressions(input, expr_chunk);
 
-	key_chunk.Reset();
-	key_executor->ExecuteExpression(expr_chunk, key_chunk.data[0]);
-	key_chunk.Flatten();
-
-	auto &box_vec = key_chunk.data[0];
-	ConvertToEntries(box_vec, row_vec, count, [&](const RTreeEntry &entry) { tree->Delete(entry); });
+	ConvertToEntries(expr_chunk.data[0], row_vec, input.size(), [&](const RTreeEntry &entry) { tree->Delete(entry); });
 
 	// Deletes are applied while their commit is in progress, i.e. before it is published as the last commit
 	has_deletes = true;
