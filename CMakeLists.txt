@@ -52,7 +52,6 @@ set(ZLIB_USE_STATIC_LIBS ON)
 set(OPENSSL_USE_STATIC_LIBS ON)
 find_package(ZLIB REQUIRED)
 find_package(lz4 CONFIG REQUIRED)
-find_package(zstd CONFIG REQUIRED)
 find_package(PROJ CONFIG REQUIRED)
 find_package(GDAL CONFIG REQUIRED)
 find_package(EXPAT REQUIRED)
@@ -60,7 +59,7 @@ find_package(unofficial-sqlite3 CONFIG REQUIRED)
 
 # Important: The link order matters, its the reverse order of dependency
 set(EXTENSION_DEPENDENCIES GDAL::GDAL PROJ::proj EXPAT::EXPAT
-                           unofficial::sqlite3::sqlite3 ZLIB::ZLIB lz4::lz4 zstd::libzstd)
+                           unofficial::sqlite3::sqlite3 ZLIB::ZLIB lz4::lz4 duckdb_zstd)
 
 if(SPATIAL_USE_GEOS)
   message(STATUS "Building with GEOS functionality")

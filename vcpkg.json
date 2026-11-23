@@ -4,7 +4,6 @@
     "openssl",
     "zlib",
     "lz4",
-    "zstd",
     "geos",
     "expat",
     {

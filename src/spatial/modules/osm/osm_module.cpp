@@ -174,7 +174,7 @@ unique_ptr<FileBlock> DecompressBlob(ClientContext &context, OsmBlob &blob) {
 		}
 		break;
 	case 7:
-		if (ZSTD_decompress(buffer.get(), size, payload.data(), payload.size()) != size) {
+		if (duckdb_zstd::ZSTD_decompress(buffer.get(), size, payload.data(), payload.size()) != size) {
 			throw ParserException("Failed to decompress Zstandard OSM blob");
 		}
 		break;
