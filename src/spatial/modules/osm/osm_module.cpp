@@ -10,7 +10,9 @@
 #include "duckdb/storage/buffer_manager.hpp"
 #include "protozero/pbf_reader.hpp"
 #include "spatial/spatial_types.hpp"
+#include "lz4.h"
 #include "zlib.h"
+#include "zstd.h"
 
 #include <spatial/util/function_builder.hpp>
 
@@ -120,32 +122,64 @@ unique_ptr<FileBlock> DecompressBlob(ClientContext &context, OsmBlob &blob) {
 	auto &buffer_manager = BufferManager::GetBufferManager(context);
 	pz::pbf_reader reader(reinterpret_cast<const char *>(blob.data.get()), blob.size);
 
-	// TODO: For now we assume they are all zlib compressed
-	reader.next(2);
-	auto blob_uncompressed_size = reader.get_int32();
-	reader.next(3);
-	auto view = reader.get_view();
-
-	auto uncompressed_handle = buffer_manager.GetBufferAllocator().Allocate(blob_uncompressed_size);
-	auto uncompressed_ptr = uncompressed_handle.get();
-
-	z_stream zstream = {};
-	zstream.avail_in = view.size();
-	zstream.next_in = (Bytef *)view.data();
-	zstream.avail_out = blob_uncompressed_size;
-	zstream.next_out = (Bytef *)uncompressed_ptr;
-	auto ok = inflateInit(&zstream);
-	if (ok != Z_OK) {
-		throw ParserException("Failed to initialize zlib");
+	// Blob.data is a protobuf oneof; raw_size may occur before or after the payload.
+	pz::data_view payload;
+	uint32_t encoding = 0;
+	int32_t raw_size = -1;
+	while (reader.next()) {
+		switch (reader.tag()) {
+		case 2:
+			raw_size = reader.get_int32();
+			break;
+		case 1: // raw
+		case 3: // zlib_data
+		case 4: // lzma_data
+		case 5: // OBSOLETE_bzip2_data
+		case 6: // lz4_data
+		case 7: // zstd_data
+			encoding = reader.tag();
+			payload = reader.get_view();
+			break;
+		default:
+			reader.skip();
+		}
 	}
-	ok = inflate(&zstream, Z_FINISH);
-	if (ok != Z_STREAM_END) {
-		throw ParserException("Failed to inflate zlib");
+	if (encoding != 1 && encoding != 3 && encoding != 6 && encoding != 7) {
+		throw ParserException("Missing or unsupported OSM blob encoding: %u", encoding);
 	}
-	ok = inflateEnd(&zstream);
-	// Cool, we have the uncompressed data
 
-	return make_uniq<FileBlock>(blob.type, std::move(uncompressed_handle), blob_uncompressed_size, blob.blob_idx);
+	// The OSM PBF format limits an uncompressed blob to 32 MiB.
+	constexpr idx_t MAX_RAW_SIZE = 32 * 1024 * 1024;
+	const auto size = encoding == 1 ? payload.size() : static_cast<idx_t>(raw_size);
+	if (size == 0 || size > MAX_RAW_SIZE) {
+		throw ParserException("Invalid uncompressed OSM blob size");
+	}
+	auto buffer = buffer_manager.GetBufferAllocator().Allocate(size);
+	switch (encoding) {
+	case 1:
+		memcpy(buffer.get(), payload.data(), size);
+		break;
+	case 3: {
+		uLongf written = size;
+		if (uncompress(buffer.get(), &written, reinterpret_cast<const Bytef *>(payload.data()), payload.size()) != Z_OK ||
+		    written != size) {
+			throw ParserException("Failed to decompress zlib OSM blob");
+		}
+		break;
+	}
+	case 6:
+		if (LZ4_decompress_safe(payload.data(), char_ptr_cast(buffer.get()), NumericCast<int>(payload.size()),
+		                        NumericCast<int>(size)) != static_cast<int>(size)) {
+			throw ParserException("Failed to decompress LZ4 OSM blob");
+		}
+		break;
+	case 7:
+		if (duckdb_zstd::ZSTD_decompress(buffer.get(), size, payload.data(), payload.size()) != size) {
+			throw ParserException("Failed to decompress Zstandard OSM blob");
+		}
+		break;
+	}
+	return make_uniq<FileBlock>(blob.type, std::move(buffer), size, blob.blob_idx);
 };
 
 class GlobalState final : public GlobalTableFunctionState {

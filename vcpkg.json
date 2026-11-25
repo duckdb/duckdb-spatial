@@ -3,6 +3,7 @@
     "vcpkg-cmake",
     "openssl",
     "zlib",
+    "lz4",
     "geos",
     "expat",
     {
